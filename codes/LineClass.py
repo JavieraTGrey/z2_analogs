@@ -1,14 +1,112 @@
-import matplotlib.pyplot as plt
-from astropy.io import fits, ascii
 import datetime
+import os
+
+import functools
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from magE.plotutils import *
-from GaussianFitting import fitSpectrum, fitSpectrumMC
-from scipy.ndimage import gaussian_filter1d
-from lmfit.models import GaussianModel, PolynomialModel
-from lmfit import Parameter
 import pyneb as pn
+
+from astropy.io import ascii, fits
+from GaussianFitting import fitSpectrum, fitSpectrumMC
+from lmfit import Parameter
+from lmfit.models import GaussianModel, PolynomialModel
+from magE.plotutils import *
+from scipy.ndimage import gaussian_filter1d
+import time
+proj_DIR = "/Users/javieratoro/Desktop/proyecto 2024-2/"
+code_DIR = f"{proj_DIR}codes"
+os.chdir(code_DIR)
+
+
+# Decorators for logging and validation
+def log_method_call(func):
+    @functools.wraps(func)
+    def wrapper(self, *args, **kwargs):
+        start_time = time.time()
+        result = func(self, *args, **kwargs)
+        end_time = time.time()
+        print(f"Executed {func.__name__} in {end_time - start_time:.4f}s")
+        return result
+    return wrapper
+
+
+def validate_initialization(func):
+    @functools.wraps(func)
+    def wrapper(self, *args, **kwargs):
+        if not self.initialized:
+            raise ValueError(f'{func.__name__} cannot run.' +
+                             ' Object not properly initialized.')
+        return func(self, *args, **kwargs)
+    return wrapper
+
+
+class SpectralData:
+    def __init__(self, spectra):
+        """Read spectral data loading and management."""
+        self.DIR = spectra.get('DIR')
+        self.FILES = spectra.get('FILES')
+        self.redshift = spectra.get('redshift')
+        self.names = spectra.get('names')
+        self.mass = spectra.get('mass')
+        self.line_list, self.linelist_dict = self.load_line_list()
+        self.lines_waves = self.line_list['vacuum_wave'] * (1 + self.redshift)
+        self.line_name = self.line_list['name']
+        self.line_wave_or = self.line_list['vacuum_wave']
+        self.lines_waves = self.line_list['vacuum_wave']*(1 + self.redshift)
+        self.hdus = []
+        self.datas = []
+
+        self.zs = []
+        for i in self.FILES:
+            path = self.DIR + i
+            hdu = fits.open(path)
+            self.hdus.append(hdu)
+            mask = (hdu[1].data['wave'] > 3650)
+            data = []
+            data.append(hdu[1].data['wave'][mask])
+            data.append(hdu[1].data['flux'][mask])
+            data.append(hdu[1].data['sigma'][mask])
+            data.append(i.partition("/")[0])
+            self.datas.append(data)
+
+        self.initialized = True
+
+    em_path = f'{proj_DIR}CSV_files/emission_lines.csv'
+
+    def load_line_list(self, path=em_path):
+        """Loads the emission line list from a CSV file."""
+        line_list = pd.read_csv(path)
+        linelist_table = ascii.read(path)
+        linelist_dict = {}
+        for line in linelist_table:
+            linelist_dict[line['name']] = line['vacuum_wave']
+        return line_list, linelist_dict
+
+
+class RedshiftCalculator:
+    def __init__(self, spectral_data):
+        """ Reset redshift"""
+        self.data = spectral_data
+
+    @log_method_call
+    def reset_redshift(self):
+        wavelength, flux, _, name = self.data.datas[0]
+        lines = ['O3_5008', 'H_alpha']
+        zs = []
+        for line in lines:
+            or_wave = self.data.line_waves[self.data.line_name == line].values
+            wave_O3 = self.data.lines_waves[self.data.line_name == line].values
+            mask = (wavelength > wave_O3 - 150) & (wavelength < wave_O3 + 150)
+            wave = wavelength[mask]
+            fluxes = flux[mask]
+            peak_index = np.argmax(fluxes)
+            peak_wavelength = wave[peak_index]
+            z = (peak_wavelength / or_wave) - 1
+            zs.append(z)
+        new_redshift = np.median(zs)
+        print(f'New calculated redshift for {name},  z = {new_redshift}')
+        self.spectral_data.redshift = new_redshift
 
 
 class REDUC_LINES:
@@ -28,11 +126,6 @@ class REDUC_LINES:
         self.line_wave_or = self.line_list['vacuum_wave']
         self.lines_waves = self.line_list['vacuum_wave']*(1 + self.redshift)
         self.new_spectra = None
-
-        linelist_table = ascii.read(path)
-        self.linelist_dict = {}
-        for line in linelist_table:
-            self.linelist_dict[line['name']] = line['vacuum_wave']
 
         print(f'Using directory : {self.DIR}')
         self.hdus = []
@@ -76,7 +169,7 @@ class REDUC_LINES:
         self.redshift = np.median(zs)
         self.zs.append(zs)
 
-    def MW_dust_corr(self, E_BV, rel_Hb=False, plot=True):
+    def MW_dust_corr(self, rel_Hb=False, plot=True):
         '''
         Receives a spectrum (wl, fl, err) and a reddening constant E_BV and returns
         the dust corrected spectra using PyNeb. If rel_Hb=True, the correction is
@@ -86,7 +179,24 @@ class REDUC_LINES:
         The spectra MUST be in rest-frame wavelength.
         '''
         wl, fl, err, _ = self.datas[0]
-        rc = pn.RedCorr(E_BV=E_BV, R_V=3.1, law='CCM89')
+        magePath = '/Users/javieratoro/Desktop/proyecto 2024-2/'
+        extinction = pd.read_table(magePath+'CSV_files/extinction.tbl',
+                                   comment='#', sep='\s+')
+
+        # Clean up the table
+        for key in extinction.keys():
+            extinction.rename(columns={key: key[1:]}, inplace=True)
+        extinction.drop([0, 1], axis=0, inplace=True)
+
+        # Dust extinction correction for the galaxy
+        gal_id = self.names[0][:5]
+        print('Performing dust correction for ' + gal_id)
+
+        igal = np.argmax(extinction['objname'] == gal_id)
+
+        E_BV_table = float(extinction['E_B_V_SandF'][igal + 2])
+        self.IRSA_E_BV = E_BV_table
+        rc = pn.RedCorr(E_BV=E_BV_table, R_V=3.1, law='CCM89')
 
         if rel_Hb:
             dcorr_fl = fl * rc.getCorrHb(wl)
@@ -113,7 +223,7 @@ class REDUC_LINES:
             title = f"Object: {self.names[0][:5]}"
             ax.set_title(title +
                          f', z = {str(np.round(self.redshift, 2))}' +
-                         ' E$_{B - V}$ = ' + str(E_BV))
+                         ' E$_{B - V}$ = ' + str(E_BV_table))
 
             DIR = '/Users/javieratoro/Desktop/proyecto 2024-2/'
 
