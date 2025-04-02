@@ -77,7 +77,7 @@ class SPECTRALDATA:
 class REDSHIFT:
     '''
     Receives the SPECTRALDATA class and calculates source's redshift according
-    to H_alpha and O[III]5008 emission lines. Updating the new value in the
+    to H_alpha and O[III]5007 emission lines. Updating the new value in the
     SPECTRALDATA class.
     '''
     def __init__(self, spectra):
@@ -127,9 +127,9 @@ class REDSHIFT:
 class MW_DUST_CORR:
     """
     Receives a spectrum (wl, fl, err) and a reddening constant E_BV,
-    and returns the dust-corrected spectra using PyNeb. 
+    and returns the dust-corrected spectra using PyNeb.
     Uses the MW extinction curve from CCM89.
-    
+
     The spectra MUST be in rest-frame wavelength.
     """
 
@@ -140,14 +140,18 @@ class MW_DUST_CORR:
 
         # Unpack spectrum data
         self.wl, self.fl, self.err, _ = self.spectra.datas[0]
+        self.gal_id = self.spectra.names[0][:5]
+        self.MW_dust_corr()
 
+    @log_method_call
+    def MW_dust_corr(self):
         # Read extinction data and apply correction
         self.read_extinction()
 
-        print(f'Performing dust correction for {gal_id}')
+        print(f'Performing dust correction for {self.gal_id}')
 
         # Retrieve E_BV value safely
-        E_BV_table = float(self.extinction.loc[self.extinction['objname'] == gal_id, 'E_B_V_SandF'].iloc[0])
+        E_BV_table = float(self.extinction.loc[self.extinction['objname'] == self.gal_id, 'E_B_V_SandF'].iloc[0])
         self.IRSA_E_BV = E_BV_table
 
         # Apply extinction correction
@@ -160,10 +164,10 @@ class MW_DUST_CORR:
 
         # Plot corrected spectra
         if self.plot:
-            self.plot_spectra(dcorr_fl, gal_id, E_BV_table)
+            self.plot_spectra(dcorr_fl, E_BV_table)
 
         # Save corrected data
-        self.save_corrected_data(dcorr_fl, dcorr_err, gal_id)
+        self.save_corrected_data(dcorr_fl, dcorr_err)
 
     def read_extinction(self):
         """Reads extinction table and applies dust correction."""
@@ -175,11 +179,11 @@ class MW_DUST_CORR:
         self.extinction.drop(index=[0, 1], inplace=True)
 
         # Get galaxy ID and check if it exists in extinction table
-        gal_id = self.spectra.names[0][:5]
-        if gal_id not in self.extinction['objname'].values:
-            raise ValueError(f"Galaxy ID {gal_id} not found in extinction table.")
 
-    def plot_spectra(self, dcorr_fl, gal_id, E_BV_table):
+        if self.gal_id not in self.extinction['objname'].values:
+            raise ValueError(f"Galaxy ID {self.gal_id} not found in extinction table.")
+
+    def plot_spectra(self, dcorr_fl, E_BV_table):
         """Plots the observed vs dust-corrected spectrum."""
         fig, ax = plt.subplots(figsize=(10, 3))
 
@@ -188,21 +192,20 @@ class MW_DUST_CORR:
 
         ax.set_xlabel(r'$\lambda$ (Angstrom)', fontsize=15)
         ax.set_ylabel(r'Flux (erg / s / cm$^{2}$)', fontsize=15)
-        ax.set_title(f"Object: {gal_id}, z = {np.round(self.spectra.redshift, 2)}" +
+        ax.set_title(f"Object: {self.gal_id}, z = {np.round(self.spectra.redshift, 2)}" +
                      f", E$_{{B - V}}$ = {E_BV_table}")
         ax.legend()
 
-        save_path = f'/Users/javieratoro/Desktop/proyecto 2024-2/dust/dcorr_{gal_id}.pdf'
+        save_path = f'/Users/javieratoro/Desktop/proyecto 2024-2/dust/dcorr_{self.gal_id}.pdf'
         fig.savefig(save_path, bbox_inches='tight')
         print(f'Saved figure at: {save_path}')
 
-    def save_corrected_data(self, dcorr_fl, dcorr_err, gal_id):
+    def save_corrected_data(self, dcorr_fl, dcorr_err):
         """Saves the corrected data to a CSV file."""
-        save_path = f'/Users/javieratoro/Desktop/proyecto 2024-2/dust/dcorr_{gal_id}.csv'
+        save_path = f'/Users/javieratoro/Desktop/proyecto 2024-2/dust/dcorr_{self.gal_id}.csv'
         df = pd.DataFrame({'wave': self.wl, 'flux': dcorr_fl, 'sigma': dcorr_err})
         df.to_csv(save_path, index=False)
         print(f'Saved MW dust corrected data to: {save_path}')
-
 
 
 class BALMER_ABS:
