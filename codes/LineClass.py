@@ -1,13 +1,17 @@
 import datetime
 import os
 
+import astropy.constants as const
 import functools
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from pkg_resources import file_ns_handler
 import pyneb as pn
 
 from astropy.io import ascii, fits
+from pyparsing import col
+from sklearn.cluster import MiniBatchKMeans
 from GaussianFitting import fitSpectrum, fitSpectrumMC
 from lmfit import Parameter
 from lmfit.models import GaussianModel, PolynomialModel
@@ -84,19 +88,23 @@ class REDSHIFT:
         self.spectra = spectra
         self.spectra.hdus, self.spectra.datas, self.spectra.zs = [], [], []
 
-        for file in self.spectra.FILES:
-            path = self.spectra.DIR + file
-            with fits.open(path) as hdu:
-                self.spectra.hdus.append(hdu)
-                mask = hdu[1].data['wave'] > 3650
-                data = [
-                    hdu[1].data['wave'][mask],   # Wavelength
-                    hdu[1].data['flux'][mask],   # Flux
-                    hdu[1].data['sigma'][mask],  # Sigma
-                    file.partition("/")[0]       # File name
-                ]
-                self.spectra.datas.append(data)
-                self.reset_redshift(data)  # Adjust redshift
+        self.zs = []
+        for i in self.spectra.FILES:
+            path = self.spectra.DIR + i
+            print(path)
+            hdu = fits.open(path)
+            self.spectra.hdus.append(hdu)
+            mask = (hdu[1].data['wave'] > 3650)
+            data = []
+            data.append(hdu[1].data['wave'][mask])
+            data.append(hdu[1].data['flux'][mask])
+            data.append(hdu[1].data['sigma'][mask])
+            data.append(i.partition("/")[0])
+            self.spectra.datas.append(data)
+
+            self.reset_redshift(data)
+
+        self.spectra.lines_waves = self.spectra.line_list['vacuum_wave']*(1 + self.spectra.redshift)
 
     @log_method_call
     def reset_redshift(self, data):
@@ -209,177 +217,267 @@ class MW_DUST_CORR:
 
 
 class BALMER_ABS:
-    def balmer_absorption(self, showplot=False, default=True):
-        balmer_lines = ['H_alpha', 'H_beta', 'H_gamma', 'H_delta',
-                        'H_epsilon', 'H_6', 'H_7', 'H_8', 'H_9', 'H_10', 'H_11']
+    def __init__(self, spectra, showplot=False):
+        self.spectra = spectra
+        self.gal_id = self.spectra.names[0][:5]
+        self.read_data()
+        # Set Balmer lines names
+        self.balmer_lines = ['H_alpha', 'H_beta', 'H_gamma', 'H_delta',
+                             'H_epsilon', 'H_6', 'H_7', 'H_8', 'H_9', 'H_10',
+                             'H_11']
 
-        wave1, flux1, _, _ = self.datas[0]
-        self.new_spectra = flux1.copy()
-        stamps = []
-        comps = []
-        new_fluxes = []
+        # Read MW dust corrected data if it exist
+        self.read_data()
 
-        def get_center_and_sep(label):
-            """Return the center and separation value based on the label."""
-            center = self.linelist_dict[label] * (1 + self.redshift)
+    def read_data(self):
+        """
+        Reads MW duct corrected data if it exist, otherwise reads the
+        uncorrected data.
+        """
+        print(f'Reading data for {self.gal_id}')
+        file_path = f'{proj_DIR}dust/dcorr_{self.gal_id}.csv'
+        if os.path.exists(file_path):
+            print("Using MW dust corrected data")
+            dcorr = pd.read_csv(file_path)
+            arrays = dcorr.to_numpy().T  # Transpose to get column-wise array
+            self.wave, self.flux, self.sigma = arrays
 
-            if label == 'H_alpha':
-                center_N2 = self.linelist_dict['N2_6585'] * (1 + self.redshift)
-                center_N1 = self.linelist_dict['N2_6550'] * (1 + self.redshift)
-                sep = 2.5 * (center_N2 - center_N1)
-            elif label in ['H_8', 'H_9', 'H_10', 'H_11']:
-                center_H2 = self.linelist_dict['H_8'] * (1 + self.redshift)
-                center_H1 = self.linelist_dict['H_9'] * (1 + self.redshift)
-                sep = 1.25 * (center_H2 - center_H1)
+        else:
+            print("Using uncorrected data")
+            self.wave, self.flux, self.sigma, _ = self.spectra.datas[0]
+
+    def first_sigma_est(self):
+        fit = fitSpectrum(self.wave, self.flux, self.sigma,
+                          linelist=self.spectra.linelist_dict,
+                          z_init=self.spectra.redshift,
+                          weights=1/self.sigma**2,
+                          showPlot=True,
+                          broad=True, nfev=1000)
+
+        sigma_narrow = fit.params['sigma_v_narrow']
+        sigma_broad = fit.params['sigma_v_broad']
+
+        fig = plt.figure()
+        plt.plot(self.wave, self.flux)
+        plt.plot(self.wave, fit.best_fit)
+        plt.show()
+
+        return [sigma_narrow, sigma_broad]
+
+    def stamp(self, sigmas):
+        bright_lines = ['O2_3725', 'O2_3727', 'H_alpha', 'H_beta', 'H_gamma',
+                        'O3_5008', 'O3_4959', 'N2_6550', 'N2_6585', 'S2_6716',
+                        'S2_6730']
+        self.masked_flux = self.flux.copy()
+        stamps, comps, masked_stamps = [], [], []
+
+        [sigma_narrow, sigma_broad] = sigmas
+
+        def get_sigma(label):
+            if label in bright_lines:
+                sigma = (center / const.c.to('km/s').value) * sigma_broad.value
             else:
-                center_2 = self.linelist_dict['H_epsilon'] * (1 + self.redshift)
-                center_1 = self.linelist_dict['Ne3_3868'] * (1 + self.redshift)
-                sep = 1.35 * (center_2 - center_1)
-            return center, sep
+                sigma = (center / const.c.to('km/s').value) * sigma_narrow.value
+            return sigma
 
-        for label in balmer_lines:
-            center, sep = get_center_and_sep(label)
 
-            # Select a stamp
-            lamb = wave1[(wave1 < center+sep) & (wave1 > center-sep)]
-            flux2 = flux1[(wave1 < center+sep) & (wave1 > center-sep)]
+        # Mask every emission line
+        for label in self.spectra.linelist_dict:
+            center = self.spectra.linelist_dict[label] * (1 + self.spectra.redshift)
+            sigma = get_sigma(label)
+            mask_line = (self.wave > center - 4*sigma) & (self.wave < center + 4*sigma)
 
-            # Mask the emission line
-            # if 'alpha' in label or 'beta' in label:
-            #     mask = (wave1 < center+seps[2][0]) & (wave1 > center-seps[2][1])
-            # elif not any(char.isdigit() for char in label) and not ('alpha' in label or 'beta' in label):
-            #     mask = (wave1 < center+seps[1][0]) & (wave1 > center-seps[1][1])
-            # else:
-            #     mask = (wave1 < center+seps[0][0]) & (wave1 > center-seps[0][1])
+            # Every line to nan
+            self.masked_flux[mask_line] = np.nan
 
-            mask = (wave1 < center+sep/8) & (wave1 > center-sep/8)
+        # Create the stamp
+        for label in self.balmer_lines:
+            center = self.spectra.linelist_dict[label] * (1 + self.spectra.redshift)
+            sigma = get_sigma(label)
 
-            new_flux = flux1.copy()
+            mask_stamp = (self.wave > center - 15*sigma) & (self.wave > center +15*sigma)
 
-            new_flux[flux1 > np.median(new_flux[(wave1 < center+sep) & (wave1 > center-sep)]) + 2] = np.nan
+            masked_stamps = self.masked_flux[mask_stamp]
+            stamp = self.flux[mask_stamp]
+            masked_wave = self.wave[masked_stamps]
 
-            new_flux[mask] = np.nan
+            masked_stamps.append(mask_stamp)
+            stamps.sppend([stamp, masked_wave])
 
-            new_flux = new_flux[(wave1 < center+sep) & (wave1 > center-sep)]
+            plt.figure()
+            plt.plot()
 
-            narrow_gaussians = GaussianModel(prefix=label+'_narrow_')
+        plt.figure()
+        plt.plot(self.wave, self.flux)
+        plt.plot(self.wave, self.masked_flux)
+        plt.show()
 
-            polydeg = 1
-            polynomial = PolynomialModel(degree=polydeg)
 
-            comp_mult = narrow_gaussians + polynomial
-            pars_mult = comp_mult.make_params()
 
-            pars_mult.add(name='z', value=self.redshift, vary=False)
-            small_h = ['H_7', 'H_8', 'H_9', 'H_10', 'H_11']
-            min_v = 200 if label in small_h else 500
-            # max_v = 700 if label in small_h else 2000
-            # guess = 400  if label in small_h else 900
-            if default is True:
-                max_v = 700 if label in small_h else 1000
-                guess = 400 if label in small_h else 700
-            else:
-                max_v = 1000
-                guess = 500 if label in small_h else 800
+        # for label in self.balmer_lines():
+        #     # Create the stamp 10 sigma from the center
+        #     center = self.spectra.linelist_dict[label] * (1 + self.spectra.redshift)
+        #     mask_stamp = (self.wave < center + 10*sigma) & (self.wave > center - 10*sigma)
+        #     lamb = self.wave[mask_stamp]
+        #     flux_stamp = self.flux[mask_stamp]
 
-            pars_mult.add(name='sigma_v_narrow', value=guess, min=min_v, max=max_v)
+            # Mask every other line
+            
 
-            lam = self.linelist_dict[label]
-            for param in ['center', 'amplitude', 'sigma']:
-                narrow_key = f'{label}_narrow_{param}'
-                if param == 'center':
-                    value = lam
-                    vary_ = False
-                    min_ = None
-                    max_ = None
-                    expr = f'{lam:6.2f}*(1+z)'
-                elif param == 'amplitude':
-                    value = -20
-                    vary_ = True
-                    min_ = -100
-                    max_ = 0
-                    expr = None
-                elif param == 'sigma':
-                    vary_ = True
-                    min_ = None
-                    max_ = None
-                    expr = f'(sigma_v_narrow/3e5)*{label}_narrow_center'
-                pars_mult[narrow_key] = Parameter(name=narrow_key, value=value,
-                                                  vary=vary_, expr=expr,
-                                                  min=min_, max=max_)
 
-            for i in range(polydeg+1):
-                pars_mult[f'c{i:1.0f}'].set(value=0)
+    # def  balmer_abs(self):
+    #     self.new_spectra = self.flux.copy()
+    #     stamps, comps, new_fluxes = [], [], []
+        # for label in self.balmer_lines:
+        #     center, sep = get_center_and_sep(label)
 
-            out_comp_mult = comp_mult.fit(new_flux, pars_mult, x=lamb,
-                                          nan_policy='omit', max_nfev=1000)
+        #     # Select a stamp
+        #     mask = (self.wave < center+sep) & (self.wave > center-sep)
+        #     lamb = self.wave[mask]
+            # flux_stamp = self.flux[mask]
+        # for label in balmer_lines:
+        #     center, sep = get_center_and_sep(label)
 
-            comp = out_comp_mult.eval_components(x=lamb)
-            balmer_abs = comp[f'{label}_narrow_'] - np.median(comp[f'{label}_narrow_'])
+        #     # Select a stamp
+        #     lamb = wave1[(wave1 < center+sep) & (wave1 > center-sep)]
+        #     flux2 = flux1[(wave1 < center+sep) & (wave1 > center-sep)]
 
-            self.new_spectra[(wave1 < center+sep) & (wave1 > center-sep)] -= balmer_abs
-            stamps.append(self.new_spectra[(wave1 < center+sep) & (wave1 > center-sep)])
-            comps.append(comp)
-            new_fluxes.append(new_flux)
-            # fig = plt.figure()
-            # plt.title(label)
-            # plt.plot(lamb, flux2)
-            # plt.plot(lamb, comp[f'{label}_narrow_'] + comp['polynomial'])
-            # plt.plot(lamb, balmer_abs)
-            # plt.plot(lamb, flux2 - comp[f'{label}_narrow_'])
-            # plt.show()
+        #     # Mask the emission line
+        #     # if 'alpha' in label or 'beta' in label:
+        #     #     mask = (wave1 < center+seps[2][0]) & (wave1 > center-seps[2][1])
+        #     # elif not any(char.isdigit() for char in label) and not ('alpha' in label or 'beta' in label):
+        #     #     mask = (wave1 < center+seps[1][0]) & (wave1 > center-seps[1][1])
+        #     # else:
+        #     #     mask = (wave1 < center+seps[0][0]) & (wave1 > center-seps[0][1])
 
-            header = self.hdus[0][1].header
-            header['EXTNAME_2'] = 'ST_AB_CORR'
-            header['DATE'] = str(datetime.date.today())
+        #     mask = (wave1 < center+sep/8) & (wave1 > center-sep/8)
 
-            hdu = fits.PrimaryHDU(self.new_spectra, header)
+        #     new_flux = flux1.copy()
 
-            hdul = fits.HDUList([hdu])
-            self.hdu_corrected = hdul
-            DIR = '/Users/javieratoro/Desktop/proyecto 2024-2/balmer_absorption/'
-            hdul.writeto(DIR + f'{self.names[0][:5]}_STELLAR_abscorr.fits',
-                         overwrite=True)
+        #     new_flux[flux1 > np.median(new_flux[(wave1 < center+sep) & (wave1 > center-sep)]) + 2] = np.nan
 
-        if showplot is True:
-            fig, axs = plt.subplots(4, 3, figsize=(13, 12))
-            axs = axs.ravel()
+        #     new_flux[mask] = np.nan
 
-            for idx, (stamp, label, comp, new_flux) in enumerate(zip(stamps,
-                                                                     balmer_lines,
-                                                                     comps,
-                                                                     new_fluxes)):
-                center, sep = get_center_and_sep(label)
+        #     new_flux = new_flux[(wave1 < center+sep) & (wave1 > center-sep)]
 
-                lamb = wave1[(wave1 < center+sep) & (wave1 > center-sep)]
-                flux2 = flux1[(wave1 < center + sep) & (wave1 > center - sep)]
+        #     narrow_gaussians = GaussianModel(prefix=label+'_narrow_')
 
-                axs[idx].set_title(label)
-                axs[idx].plot(lamb, flux2, 'red', lw=1, drawstyle='steps-mid',
-                              label='Observed spectrum', alpha=0.5)
-                axs[idx].plot(lamb, new_flux, 'blue', lw=1, drawstyle='steps-mid',
-                              alpha=0.5)
-                axs[idx].plot(lamb, comp['polynomial'], 'green', lw=1,
-                              alpha=0.5, label='model')
-                axs[idx].plot(lamb, comp[f'{label}_narrow_'], 'teal', lw=1,
-                              alpha=0.5)
-                axs[idx].plot(lamb, flux2 - (comp[f'{label}_narrow_']),
-                              'magenta', lw=1,
-                              alpha=0.5, label='Corrected')
-                axs[idx].vlines(center, 0, np.max(flux2), 'grey', '--',
-                                alpha=0.3)
-                axs[idx].set_xlabel(r'Obs. Wavelength ($\AA$)', size=14)
-                axs[idx].set_ylabel(r'Flux ($10^{-17} erg/s/cm^{2}/\AA$)',
-                                    size=14)
-                axs[idx].set_xlim([np.min(lamb), np.max(lamb)])
-                axs[idx].set_ylim([np.min(comp[f'{label}_narrow_']) - 5, 30])
-                axs[idx].legend()
+        #     polydeg = 1
+        #     polynomial = PolynomialModel(degree=polydeg)
 
-            for ax in axs[len(stamps):]:
-                ax.axis("off")
+        #     comp_mult = narrow_gaussians + polynomial
+        #     pars_mult = comp_mult.make_params()
 
-            fig.tight_layout()
-            plt.show()
+        #     pars_mult.add(name='z', value=self.redshift, vary=False)
+        #     small_h = ['H_7', 'H_8', 'H_9', 'H_10', 'H_11']
+        #     min_v = 200 if label in small_h else 500
+        #     # max_v = 700 if label in small_h else 2000
+        #     # guess = 400  if label in small_h else 900
+        #     if default is True:
+        #         max_v = 700 if label in small_h else 1000
+        #         guess = 400 if label in small_h else 700
+        #     else:
+        #         max_v = 1000
+        #         guess = 500 if label in small_h else 800
+
+        #     pars_mult.add(name='sigma_v_narrow', value=guess, min=min_v, max=max_v)
+
+        #     lam = self.linelist_dict[label]
+        #     for param in ['center', 'amplitude', 'sigma']:
+        #         narrow_key = f'{label}_narrow_{param}'
+        #         if param == 'center':
+        #             value = lam
+        #             vary_ = False
+        #             min_ = None
+        #             max_ = None
+        #             expr = f'{lam:6.2f}*(1+z)'
+        #         elif param == 'amplitude':
+        #             value = -20
+        #             vary_ = True
+        #             min_ = -100
+        #             max_ = 0
+        #             expr = None
+        #         elif param == 'sigma':
+        #             vary_ = True
+        #             min_ = None
+        #             max_ = None
+        #             expr = f'(sigma_v_narrow/3e5)*{label}_narrow_center'
+        #         pars_mult[narrow_key] = Parameter(name=narrow_key, value=value,
+        #                                           vary=vary_, expr=expr,
+        #                                           min=min_, max=max_)
+
+        #     for i in range(polydeg+1):
+        #         pars_mult[f'c{i:1.0f}'].set(value=0)
+
+        #     out_comp_mult = comp_mult.fit(new_flux, pars_mult, x=lamb,
+        #                                   nan_policy='omit', max_nfev=1000)
+
+        #     comp = out_comp_mult.eval_components(x=lamb)
+        #     balmer_abs = comp[f'{label}_narrow_'] - np.median(comp[f'{label}_narrow_'])
+
+        #     self.new_spectra[(wave1 < center+sep) & (wave1 > center-sep)] -= balmer_abs
+        #     stamps.append(self.new_spectra[(wave1 < center+sep) & (wave1 > center-sep)])
+        #     comps.append(comp)
+        #     new_fluxes.append(new_flux)
+        #     # fig = plt.figure()
+        #     # plt.title(label)
+        #     # plt.plot(lamb, flux2)
+        #     # plt.plot(lamb, comp[f'{label}_narrow_'] + comp['polynomial'])
+        #     # plt.plot(lamb, balmer_abs)
+        #     # plt.plot(lamb, flux2 - comp[f'{label}_narrow_'])
+        #     # plt.show()
+
+        #     header = self.hdus[0][1].header
+        #     header['EXTNAME_2'] = 'ST_AB_CORR'
+        #     header['DATE'] = str(datetime.date.today())
+
+        #     hdu = fits.PrimaryHDU(self.new_spectra, header)
+
+        #     hdul = fits.HDUList([hdu])
+        #     self.hdu_corrected = hdul
+        #     DIR = '/Users/javieratoro/Desktop/proyecto 2024-2/balmer_absorption/'
+        #     hdul.writeto(DIR + f'{self.names[0][:5]}_STELLAR_abscorr.fits',
+        #                  overwrite=True)
+
+        # if showplot is True:
+        #     fig, axs = plt.subplots(4, 3, figsize=(13, 12))
+        #     axs = axs.ravel()
+
+        #     for idx, (stamp, label, comp, new_flux) in enumerate(zip(stamps,
+        #                                                              balmer_lines,
+        #                                                              comps,
+        #                                                              new_fluxes)):
+        #         center, sep = get_center_and_sep(label)
+
+        #         lamb = wave1[(wave1 < center+sep) & (wave1 > center-sep)]
+        #         flux2 = flux1[(wave1 < center + sep) & (wave1 > center - sep)]
+
+        #         axs[idx].set_title(label)
+        #         axs[idx].plot(lamb, flux2, 'red', lw=1, drawstyle='steps-mid',
+        #                       label='Observed spectrum', alpha=0.5)
+        #         axs[idx].plot(lamb, new_flux, 'blue', lw=1, drawstyle='steps-mid',
+        #                       alpha=0.5)
+        #         axs[idx].plot(lamb, comp['polynomial'], 'green', lw=1,
+        #                       alpha=0.5, label='model')
+        #         axs[idx].plot(lamb, comp[f'{label}_narrow_'], 'teal', lw=1,
+        #                       alpha=0.5)
+        #         axs[idx].plot(lamb, flux2 - (comp[f'{label}_narrow_']),
+        #                       'magenta', lw=1,
+        #                       alpha=0.5, label='Corrected')
+        #         axs[idx].vlines(center, 0, np.max(flux2), 'grey', '--',
+        #                         alpha=0.3)
+        #         axs[idx].set_xlabel(r'Obs. Wavelength ($\AA$)', size=14)
+        #         axs[idx].set_ylabel(r'Flux ($10^{-17} erg/s/cm^{2}/\AA$)',
+        #                             size=14)
+        #         axs[idx].set_xlim([np.min(lamb), np.max(lamb)])
+        #         axs[idx].set_ylim([np.min(comp[f'{label}_narrow_']) - 5, 30])
+        #         axs[idx].legend()
+
+        #     for ax in axs[len(stamps):]:
+        #         ax.axis("off")
+
+        #     fig.tight_layout()
+        #     plt.show()
 
 
 class REDUC_LINES:
@@ -399,7 +497,7 @@ class REDUC_LINES:
         self.line_wave_or = self.line_list['vacuum_wave']
         self.lines_waves = self.line_list['vacuum_wave']*(1 + self.redshift)
         self.new_spectra = None
-
+        self.line_list, self.linelist_dict = self.load_line_list()
         print(f'Using directory : {self.DIR}')
         self.hdus = []
         self.datas = []
@@ -423,6 +521,17 @@ class REDUC_LINES:
         self.redshift = np.median(self.zs)
         self.lines_waves = self.line_list['vacuum_wave']*(1 + self.redshift)
 
+    em_path = f'{proj_DIR}CSV_files/emission_lines.csv'
+
+    def load_line_list(self, path=em_path):
+        """Loads the emission line list from a CSV file."""
+        line_list = pd.read_csv(path)
+        linelist_table = ascii.read(path)
+        linelist_dict = {}
+        for line in linelist_table:
+            linelist_dict[line['name']] = line['vacuum_wave']
+        return line_list, linelist_dict
+    
     def reset_redshift(self, data):
         wavelength, flux, _, name = data
         lines = ['O3_5008', 'H_alpha']
@@ -520,7 +629,6 @@ class REDUC_LINES:
 
         def get_center_and_sep(label):
             """Return the center and separation value based on the label."""
-            center = self.linelist_dict[label] * (1 + self.redshift)
 
             if label == 'H_alpha':
                 center_N2 = self.linelist_dict['N2_6585'] * (1 + self.redshift)
