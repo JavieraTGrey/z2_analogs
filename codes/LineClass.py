@@ -217,7 +217,7 @@ class MW_DUST_CORR:
 
 
 class BALMER_ABS:
-    def __init__(self, spectra, showplot=False):
+    def __init__(self, spectra, showplot=False, verbose=False):
         self.spectra = spectra
         self.gal_id = self.spectra.names[0][:5]
         self.read_data()
@@ -246,30 +246,25 @@ class BALMER_ABS:
             print("Using uncorrected data")
             self.wave, self.flux, self.sigma, _ = self.spectra.datas[0]
 
-    def first_sigma_est(self):
+    def first_sigma_est(self, verbose):
         fit = fitSpectrum(self.wave, self.flux, self.sigma,
                           linelist=self.spectra.linelist_dict,
                           z_init=self.spectra.redshift,
                           weights=1/self.sigma**2,
-                          showPlot=True,
+                          showPlot=verbose,
                           broad=True, nfev=1000)
 
         sigma_narrow = fit.params['sigma_v_narrow']
         sigma_broad = fit.params['sigma_v_broad']
 
-        fig = plt.figure()
-        plt.plot(self.wave, self.flux)
-        plt.plot(self.wave, fit.best_fit)
-        plt.show()
-
         return [sigma_narrow, sigma_broad]
 
-    def stamp(self, sigmas):
+    def get_stamp(self, sigmas):
         bright_lines = ['O2_3725', 'O2_3727', 'H_alpha', 'H_beta', 'H_gamma',
                         'O3_5008', 'O3_4959', 'N2_6550', 'N2_6585', 'S2_6716',
                         'S2_6730']
         self.masked_flux = self.flux.copy()
-        stamps, comps, masked_stamps = [], [], []
+        stamps, masked_stamps = [], []
 
         [sigma_narrow, sigma_broad] = sigmas
 
@@ -280,12 +275,12 @@ class BALMER_ABS:
                 sigma = (center / const.c.to('km/s').value) * sigma_narrow.value
             return sigma
 
-
         # Mask every emission line
         for label in self.spectra.linelist_dict:
             center = self.spectra.linelist_dict[label] * (1 + self.spectra.redshift)
             sigma = get_sigma(label)
-            mask_line = (self.wave > center - 4*sigma) & (self.wave < center + 4*sigma)
+
+            mask_line = (self.wave > center - 3*sigma) & (self.wave < center + 3*sigma)
 
             # Every line to nan
             self.masked_flux[mask_line] = np.nan
@@ -295,189 +290,82 @@ class BALMER_ABS:
             center = self.spectra.linelist_dict[label] * (1 + self.spectra.redshift)
             sigma = get_sigma(label)
 
-            mask_stamp = (self.wave > center - 15*sigma) & (self.wave > center +15*sigma)
+            mask_stamp = (self.wave > center - 25*sigma) & (self.wave < center + 25*sigma)
 
-            masked_stamps = self.masked_flux[mask_stamp]
+            masked_stamp = self.masked_flux[mask_stamp]
             stamp = self.flux[mask_stamp]
-            masked_wave = self.wave[masked_stamps]
+            masked_wave = self.wave[mask_stamp]
 
-            masked_stamps.append(mask_stamp)
-            stamps.sppend([stamp, masked_wave])
+            masked_stamps.append(masked_stamp)
+            stamps.append([stamp, masked_wave])
+        return stamps, masked_stamps
 
-            plt.figure()
-            plt.plot()
+    def model(self, stamps, masked_stamps):
+        comps = []
+        for label, stamp_, masked_stamp in zip(self.balmer_lines,
+                                               stamps,
+                                               masked_stamps):
+            stamp, masked_wave = stamp_
 
-        plt.figure()
-        plt.plot(self.wave, self.flux)
-        plt.plot(self.wave, self.masked_flux)
-        plt.show()
+            # Gaussian model for balmer abs
+            gaussian = GaussianModel(prefix=label+'_')
 
+            # Create a polynomial model for the continuum
+            polydeg = 1
+            polynomial = PolynomialModel(degree=polydeg)
 
+            comp_mult = gaussian + polynomial
+            pars_mult = comp_mult.make_params()
 
-        # for label in self.balmer_lines():
-        #     # Create the stamp 10 sigma from the center
-        #     center = self.spectra.linelist_dict[label] * (1 + self.spectra.redshift)
-        #     mask_stamp = (self.wave < center + 10*sigma) & (self.wave > center - 10*sigma)
-        #     lamb = self.wave[mask_stamp]
-        #     flux_stamp = self.flux[mask_stamp]
+            pars_mult.add(name='z', value=self.spectra.redshift,
+                          vary=False)
 
-            # Mask every other line
-            
+            pars_mult.add(name='sigma_v', value=300, min=100, max=800)
 
+            # Loop through emission lines to define parameters
+            # for narrow and broad
+            lam = self.spectra.linelist_dict[label]
+            for param in ['center', 'amplitude', 'sigma']:
+                narrow_key = f'{label}_{param}'
+                if param == 'center':
+                    value = lam
+                    vary_ = False
+                    min_ = None
+                    max_ = None
+                    expr = f'{lam:6.2f}*(1+z)'
+                elif param == 'amplitude':
+                    value = -10
+                    vary_ = True
+                    min_ = -100
+                    max_ = 0
+                    expr = None
+                elif param == 'sigma':
+                    vary_ = True
+                    min_ = None
+                    max_ = None
+                    expr = f'(sigma_v/3e5)*{label}_center'
+                pars_mult[narrow_key] = Parameter(name=narrow_key,
+                                                  value=value,
+                                                  vary=vary_, expr=expr,
+                                                  min=min_, max=max_)
+            for i in range(polydeg+1):
+                pars_mult[f'c{i:1.0f}'].set(value=0)
 
-    # def  balmer_abs(self):
-    #     self.new_spectra = self.flux.copy()
-    #     stamps, comps, new_fluxes = [], [], []
-        # for label in self.balmer_lines:
-        #     center, sep = get_center_and_sep(label)
+            out_comp_mult = comp_mult.fit(masked_stamp, pars_mult,
+                                          x=masked_wave,
+                                          nan_policy='omit',
+                                          max_nfev=1000)
 
-        #     # Select a stamp
-        #     mask = (self.wave < center+sep) & (self.wave > center-sep)
-        #     lamb = self.wave[mask]
-            # flux_stamp = self.flux[mask]
-        # for label in balmer_lines:
-        #     center, sep = get_center_and_sep(label)
+            comps.append(out_comp_mult)
 
-        #     # Select a stamp
-        #     lamb = wave1[(wave1 < center+sep) & (wave1 > center-sep)]
-        #     flux2 = flux1[(wave1 < center+sep) & (wave1 > center-sep)]
-
-        #     # Mask the emission line
-        #     # if 'alpha' in label or 'beta' in label:
-        #     #     mask = (wave1 < center+seps[2][0]) & (wave1 > center-seps[2][1])
-        #     # elif not any(char.isdigit() for char in label) and not ('alpha' in label or 'beta' in label):
-        #     #     mask = (wave1 < center+seps[1][0]) & (wave1 > center-seps[1][1])
-        #     # else:
-        #     #     mask = (wave1 < center+seps[0][0]) & (wave1 > center-seps[0][1])
-
-        #     mask = (wave1 < center+sep/8) & (wave1 > center-sep/8)
-
-        #     new_flux = flux1.copy()
-
-        #     new_flux[flux1 > np.median(new_flux[(wave1 < center+sep) & (wave1 > center-sep)]) + 2] = np.nan
-
-        #     new_flux[mask] = np.nan
-
-        #     new_flux = new_flux[(wave1 < center+sep) & (wave1 > center-sep)]
-
-        #     narrow_gaussians = GaussianModel(prefix=label+'_narrow_')
-
-        #     polydeg = 1
-        #     polynomial = PolynomialModel(degree=polydeg)
-
-        #     comp_mult = narrow_gaussians + polynomial
-        #     pars_mult = comp_mult.make_params()
-
-        #     pars_mult.add(name='z', value=self.redshift, vary=False)
-        #     small_h = ['H_7', 'H_8', 'H_9', 'H_10', 'H_11']
-        #     min_v = 200 if label in small_h else 500
-        #     # max_v = 700 if label in small_h else 2000
-        #     # guess = 400  if label in small_h else 900
-        #     if default is True:
-        #         max_v = 700 if label in small_h else 1000
-        #         guess = 400 if label in small_h else 700
-        #     else:
-        #         max_v = 1000
-        #         guess = 500 if label in small_h else 800
-
-        #     pars_mult.add(name='sigma_v_narrow', value=guess, min=min_v, max=max_v)
-
-        #     lam = self.linelist_dict[label]
-        #     for param in ['center', 'amplitude', 'sigma']:
-        #         narrow_key = f'{label}_narrow_{param}'
-        #         if param == 'center':
-        #             value = lam
-        #             vary_ = False
-        #             min_ = None
-        #             max_ = None
-        #             expr = f'{lam:6.2f}*(1+z)'
-        #         elif param == 'amplitude':
-        #             value = -20
-        #             vary_ = True
-        #             min_ = -100
-        #             max_ = 0
-        #             expr = None
-        #         elif param == 'sigma':
-        #             vary_ = True
-        #             min_ = None
-        #             max_ = None
-        #             expr = f'(sigma_v_narrow/3e5)*{label}_narrow_center'
-        #         pars_mult[narrow_key] = Parameter(name=narrow_key, value=value,
-        #                                           vary=vary_, expr=expr,
-        #                                           min=min_, max=max_)
-
-        #     for i in range(polydeg+1):
-        #         pars_mult[f'c{i:1.0f}'].set(value=0)
-
-        #     out_comp_mult = comp_mult.fit(new_flux, pars_mult, x=lamb,
-        #                                   nan_policy='omit', max_nfev=1000)
-
-        #     comp = out_comp_mult.eval_components(x=lamb)
-        #     balmer_abs = comp[f'{label}_narrow_'] - np.median(comp[f'{label}_narrow_'])
-
-        #     self.new_spectra[(wave1 < center+sep) & (wave1 > center-sep)] -= balmer_abs
-        #     stamps.append(self.new_spectra[(wave1 < center+sep) & (wave1 > center-sep)])
-        #     comps.append(comp)
-        #     new_fluxes.append(new_flux)
-        #     # fig = plt.figure()
-        #     # plt.title(label)
-        #     # plt.plot(lamb, flux2)
-        #     # plt.plot(lamb, comp[f'{label}_narrow_'] + comp['polynomial'])
-        #     # plt.plot(lamb, balmer_abs)
-        #     # plt.plot(lamb, flux2 - comp[f'{label}_narrow_'])
-        #     # plt.show()
-
-        #     header = self.hdus[0][1].header
-        #     header['EXTNAME_2'] = 'ST_AB_CORR'
-        #     header['DATE'] = str(datetime.date.today())
-
-        #     hdu = fits.PrimaryHDU(self.new_spectra, header)
-
-        #     hdul = fits.HDUList([hdu])
-        #     self.hdu_corrected = hdul
-        #     DIR = '/Users/javieratoro/Desktop/proyecto 2024-2/balmer_absorption/'
-        #     hdul.writeto(DIR + f'{self.names[0][:5]}_STELLAR_abscorr.fits',
-        #                  overwrite=True)
-
-        # if showplot is True:
-        #     fig, axs = plt.subplots(4, 3, figsize=(13, 12))
-        #     axs = axs.ravel()
-
-        #     for idx, (stamp, label, comp, new_flux) in enumerate(zip(stamps,
-        #                                                              balmer_lines,
-        #                                                              comps,
-        #                                                              new_fluxes)):
-        #         center, sep = get_center_and_sep(label)
-
-        #         lamb = wave1[(wave1 < center+sep) & (wave1 > center-sep)]
-        #         flux2 = flux1[(wave1 < center + sep) & (wave1 > center - sep)]
-
-        #         axs[idx].set_title(label)
-        #         axs[idx].plot(lamb, flux2, 'red', lw=1, drawstyle='steps-mid',
-        #                       label='Observed spectrum', alpha=0.5)
-        #         axs[idx].plot(lamb, new_flux, 'blue', lw=1, drawstyle='steps-mid',
-        #                       alpha=0.5)
-        #         axs[idx].plot(lamb, comp['polynomial'], 'green', lw=1,
-        #                       alpha=0.5, label='model')
-        #         axs[idx].plot(lamb, comp[f'{label}_narrow_'], 'teal', lw=1,
-        #                       alpha=0.5)
-        #         axs[idx].plot(lamb, flux2 - (comp[f'{label}_narrow_']),
-        #                       'magenta', lw=1,
-        #                       alpha=0.5, label='Corrected')
-        #         axs[idx].vlines(center, 0, np.max(flux2), 'grey', '--',
-        #                         alpha=0.3)
-        #         axs[idx].set_xlabel(r'Obs. Wavelength ($\AA$)', size=14)
-        #         axs[idx].set_ylabel(r'Flux ($10^{-17} erg/s/cm^{2}/\AA$)',
-        #                             size=14)
-        #         axs[idx].set_xlim([np.min(lamb), np.max(lamb)])
-        #         axs[idx].set_ylim([np.min(comp[f'{label}_narrow_']) - 5, 30])
-        #         axs[idx].legend()
-
-        #     for ax in axs[len(stamps):]:
-        #         ax.axis("off")
-
-        #     fig.tight_layout()
-        #     plt.show()
+            fig2, ax = plt.subplots(figsize=(10, 4))
+            comps_ = out_comp_mult.eval_components(x=masked_wave)
+            ax.plot(masked_wave, stamp, lw=1, drawstyle='steps-mid')
+            ax.plot(masked_wave, masked_stamp)
+            ax.plot(masked_wave, comps_[f'{label}_'] + comps_['polynomial'],
+                    lw=1, drawstyle='steps-mid', alpha=0.3)
+            plt.show()
+        return comps
 
 
 class REDUC_LINES:
