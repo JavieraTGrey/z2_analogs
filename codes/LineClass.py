@@ -6,12 +6,9 @@ import functools
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from pkg_resources import file_ns_handler
 import pyneb as pn
 
 from astropy.io import ascii, fits
-from pyparsing import col
-from sklearn.cluster import MiniBatchKMeans
 from GaussianFitting import fitSpectrum, fitSpectrumMC
 from lmfit import Parameter
 from lmfit.models import GaussianModel, PolynomialModel
@@ -211,7 +208,8 @@ class MW_DUST_CORR:
     def save_corrected_data(self, dcorr_fl, dcorr_err):
         """Saves the corrected data to a CSV file."""
         save_path = f'/Users/javieratoro/Desktop/proyecto 2024-2/dust/dcorr_{self.gal_id}.csv'
-        df = pd.DataFrame({'wave': self.wl, 'flux': dcorr_fl, 'sigma': dcorr_err})
+        df = pd.DataFrame({'wave': self.wl, 'flux': dcorr_fl,
+                           'sigma': dcorr_err})
         df.to_csv(save_path, index=False)
         print(f'Saved MW dust corrected data to: {save_path}')
 
@@ -220,7 +218,6 @@ class BALMER_ABS:
     def __init__(self, spectra, showplot=False, verbose=False):
         self.spectra = spectra
         self.gal_id = self.spectra.names[0][:5]
-        self.read_data()
         # Set Balmer lines names
         self.balmer_lines = ['H_alpha', 'H_beta', 'H_gamma', 'H_delta',
                              'H_epsilon', 'H_6', 'H_7', 'H_8', 'H_9', 'H_10',
@@ -246,7 +243,7 @@ class BALMER_ABS:
             print("Using uncorrected data")
             self.wave, self.flux, self.sigma, _ = self.spectra.datas[0]
 
-    def first_sigma_est(self, verbose):
+    def first_sigma_est(self, verbose=False):
         fit = fitSpectrum(self.wave, self.flux, self.sigma,
                           linelist=self.spectra.linelist_dict,
                           z_init=self.spectra.redshift,
@@ -275,17 +272,17 @@ class BALMER_ABS:
                 sigma = (center / const.c.to('km/s').value) * sigma_narrow.value
             return sigma
 
-        # Mask every emission line
+        # Mask every emission line 3 sigma from center
         for label in self.spectra.linelist_dict:
             center = self.spectra.linelist_dict[label] * (1 + self.spectra.redshift)
             sigma = get_sigma(label)
 
-            mask_line = (self.wave > center - 3*sigma) & (self.wave < center + 3*sigma)
+            mask_line = (self.wave > center - 3.5*sigma) & (self.wave < center + 3.5*sigma)
 
             # Every line to nan
             self.masked_flux[mask_line] = np.nan
 
-        # Create the stamp
+        # Create the stamp 25 sigma from center
         for label in self.balmer_lines:
             center = self.spectra.linelist_dict[label] * (1 + self.spectra.redshift)
             sigma = get_sigma(label)
@@ -300,7 +297,7 @@ class BALMER_ABS:
             stamps.append([stamp, masked_wave])
         return stamps, masked_stamps
 
-    def model(self, stamps, masked_stamps):
+    def model_absorption(self, stamps, masked_stamps):
         comps = []
         for label, stamp_, masked_stamp in zip(self.balmer_lines,
                                                stamps,
@@ -320,10 +317,15 @@ class BALMER_ABS:
             pars_mult.add(name='z', value=self.spectra.redshift,
                           vary=False)
 
-            pars_mult.add(name='sigma_v', value=300, min=100, max=800)
+            min_val = 300 if label == 'H_alpha' else 30
+            pars_mult.add(name='sigma_v', value=300, min=min_val,
+                          max=800)
 
             # Loop through emission lines to define parameters
             # for narrow and broad
+            min_ampl = -15 if label in self.balmer_lines[-3:] else -100
+            # if label == 'H_8':
+            #     min_ampl = -35
             lam = self.spectra.linelist_dict[label]
             for param in ['center', 'amplitude', 'sigma']:
                 narrow_key = f'{label}_{param}'
@@ -336,7 +338,7 @@ class BALMER_ABS:
                 elif param == 'amplitude':
                     value = -10
                     vary_ = True
-                    min_ = -100
+                    min_ = min_ampl
                     max_ = 0
                     expr = None
                 elif param == 'sigma':
@@ -357,15 +359,45 @@ class BALMER_ABS:
                                           max_nfev=1000)
 
             comps.append(out_comp_mult)
-
-            fig2, ax = plt.subplots(figsize=(10, 4))
-            comps_ = out_comp_mult.eval_components(x=masked_wave)
-            ax.plot(masked_wave, stamp, lw=1, drawstyle='steps-mid')
-            ax.plot(masked_wave, masked_stamp)
-            ax.plot(masked_wave, comps_[f'{label}_'] + comps_['polynomial'],
-                    lw=1, drawstyle='steps-mid', alpha=0.3)
-            plt.show()
         return comps
+
+    def correct_data(self, stamps, masked_stamps, comps, plot=False):
+        new_flux = self.flux.copy()
+        wave = self.wave.copy()
+        for stamp_, comp, masked_stamp, label in zip(stamps, comps,
+                                                     masked_stamps,
+                                                     self.balmer_lines):
+            stamp, masked_wave = stamp_
+            mask = (wave >= np.min(masked_wave)) & (wave <= np.max(masked_wave))
+            model_flux = comp.eval_components(x=masked_wave)
+            balmer_abs = model_flux[f'{label}_']
+            new_flux[mask] -= balmer_abs
+
+            if plot:
+                _, axs = plt.subplots(1, 2, figsize=(10, 4))
+                axs[0].plot(masked_wave, stamp, lw=1, drawstyle='steps-mid',
+                            alpha=0.5)
+                axs[0].plot(masked_wave,
+                            model_flux[f'{label}_'] + model_flux['polynomial'],
+                            lw=1, drawstyle='steps-mid',
+                            label='Balmer abs model')
+                axs[0].set_title(f'{label} balmer absorption')
+                axs[0].set_xlabel(r'Wavelength $\AA$')
+                axs[0].set_ylabel(r'Flux (erg / s / cm$^{2}$)')
+                axs[0].legend()
+                axs[1].plot(wave[mask], stamp, alpha=0.5,
+                            lw=1, drawstyle='steps-mid',
+                            label='Uncorrected flux')
+                axs[1].plot(wave[mask], new_flux[mask], alpha=0.5,
+                            lw=1, drawstyle='steps-mid',
+                            label='Corrected flux')
+                axs[1].plot(wave[mask], model_flux['polynomial'],
+                            alpha=0.3, label='Continuum')
+                axs[1].set_xlabel(r'Wavelength $\AA$')
+                axs[1].set_ylabel(r'Flux (erg / s / cm$^{2}$)')
+                plt.legend()
+                plt.show()
+
 
 
 class REDUC_LINES:
@@ -419,7 +451,7 @@ class REDUC_LINES:
         for line in linelist_table:
             linelist_dict[line['name']] = line['vacuum_wave']
         return line_list, linelist_dict
-    
+
     def reset_redshift(self, data):
         wavelength, flux, _, name = data
         lines = ['O3_5008', 'H_alpha']
@@ -1498,10 +1530,6 @@ class REDUC_LINES:
         info.to_csv(path + f'{self.names[0][:5]}_auroral_model.csv',
                     index=False)
         return df
-
-
-
-
 
 # import matplotlib.pyplot as plt
 # from astropy.io import fits, ascii
