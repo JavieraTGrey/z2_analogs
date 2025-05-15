@@ -1,5 +1,6 @@
 import datetime
 import os
+from socketserver import ForkingTCPServer
 
 import astropy.constants as const
 import functools
@@ -324,8 +325,8 @@ class BALMER_ABS:
             # Loop through emission lines to define parameters
             # for narrow and broad
             min_ampl = -15 if label in self.balmer_lines[-3:] else -100
-            # if label == 'H_8':
-            #     min_ampl = -35
+            if label == 'H_8':
+                min_ampl = -40
             lam = self.spectra.linelist_dict[label]
             for param in ['center', 'amplitude', 'sigma']:
                 narrow_key = f'{label}_{param}'
@@ -396,7 +397,19 @@ class BALMER_ABS:
                 axs[1].set_xlabel(r'Wavelength $\AA$')
                 axs[1].set_ylabel(r'Flux (erg / s / cm$^{2}$)')
                 plt.legend()
+                path = f'{proj_DIR}bal_abs/{self.gal_id}/{label}_balabs.pdf'
+                plt.savefig(path,
+                            format='pdf')
                 plt.show()
+        return new_flux
+
+    def save_corrected_data(self, new_flux):
+        """Saves the corrected data to a CSV file."""
+        save_path = f'{proj_DIR}bal_abs/bcorr_{self.gal_id}.csv'
+        df = pd.DataFrame({'wave': self.wave, 'flux': new_flux,
+                           'sigma': self.sigma})
+        df.to_csv(save_path, index=False)
+        print(f'Saved Balmer Absorption corrected data to: {save_path}')
 
 
 
@@ -545,7 +558,7 @@ class REDUC_LINES:
         self.new_spectra = flux1.copy()
         stamps = []
         comps = []
-        new_fluxes = []
+        self.es = []
 
         def get_center_and_sep(label):
             """Return the center and separation value based on the label."""
