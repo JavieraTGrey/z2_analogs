@@ -12,9 +12,10 @@ from GaussianFitting import fitSpectrum
 from lmfit import Parameter
 from lmfit.models import GaussianModel, PolynomialModel
 import time
-proj_DIR = "/Users/javieratoro/Desktop/proyecto 2024-2/"
+
+main_DIR = "/Users/javieratoro/Desktop/thesis/"
+proj_DIR = f"{main_DIR}proyecto 2024-2/"
 code_DIR = f"{proj_DIR}codes"
-os.chdir(code_DIR)
 
 
 def log_method_call(func):
@@ -208,14 +209,17 @@ class MW_DUST_CORR:
                      f"z = {np.round(self.spectra.redshift, 2)}, "
                      f"E$_{{B - V}}$ = {E_BV_table}")
         ax.legend()
-
-        save_path = f'{proj_DIR}dust/dcorr_{self.gal_id}.pdf'
+        save_dir = f'{proj_DIR}dust/{self.gal_id}'
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = f'{save_dir}/dcorr_{self.gal_id}.pdf'
         fig.savefig(save_path, bbox_inches='tight')
         print(f'Saved figure at: {save_path}')
 
     def save_corrected_data(self, dcorr_fl, dcorr_err):
         """Saves the corrected data to a CSV file."""
-        save_path = f'{proj_DIR}dust/dcorr_{self.gal_id}.csv'
+        save_dir = f'{proj_DIR}dust/{self.gal_id}'
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = f'{save_dir}/dcorr_{self.gal_id}.csv'
         df = pd.DataFrame({'wave': self.wl, 'flux': dcorr_fl,
                            'sigma': dcorr_err})
         df.to_csv(save_path, index=False)
@@ -328,8 +332,6 @@ class BALMER_ABS:
         for label in self.spectra.linelist_dict:
             center = self.spectra.linelist_dict[label] * cte
             sigma = get_sigma(label)
-
-            print(center, sigma)
 
             mask_below = (self.wave > center - 3.5*sigma)
             mask_up = (self.wave < center + 3.5*sigma)
@@ -455,19 +457,13 @@ class BALMER_ABS:
                 axs[1].set_xlabel(r'Wavelength $\AA$')
                 axs[1].set_ylabel(r'Flux (erg / s / cm$^{2}$)')
                 plt.legend()
-                path = f'{proj_DIR}bal_abs/{self.gal_id}/{label}_balabs.pdf'
+                save_dir = f'{proj_DIR}bal_abs/{self.gal_id}'
+                os.makedirs(save_dir, exist_ok=True)
+                path = f'{save_dir}/{label}_balabs.pdf'
                 plt.savefig(path,
                             format='pdf')
                 plt.show()
         return new_flux
-
-    # def save_corrected_data(self, new_flux):
-    #     """Saves the corrected data to a CSV file."""
-    #     save_path = f'{proj_DIR}bal_abs/bcorr_{self.gal_id}.csv'
-    #     df = pd.DataFrame({'wave': self.wave, 'flux': new_flux,
-    #                        'sigma': self.sigma})
-    #     df.to_csv(save_path, index=False)
-    #     print(f'Saved Balmer Absorption corrected data to: {save_path}')
 
     def save_corrected_data(self, new_flux):
         """
@@ -487,3 +483,134 @@ class BALMER_ABS:
         df.to_csv(save_path, index=False)
 
         print(f'Saved Balmer Absorption corrected data to: {save_path}')
+
+class IMAGES:
+    """
+    A class to generate multi-panel plots of observed and other spectra.
+
+    This class creates a figure with four panels:
+        - Left: Full spectrum with observed data, model spectra, and line markers.
+        - TopRight: Zoom on the H_beta line region.
+        - TopRight2: Zoom on the H_gamma line region.
+        - Bottom: Zoom around [Ne III] λ3970 and H11 with line markers.
+
+    Parameters
+    ----------
+    spectra : object from class SPECTRA
+    fluxes : list of arrays
+        Model or processed flux arrays to be overplotted with the observed spectrum.
+    labels : list of str
+        Labels corresponding to each flux in `fluxes`.
+    path : str
+        Directory where the output PDF will be saved.
+    figname : str
+        Base filename for the saved plot (without extension).
+
+    """
+
+    def __init__(self, spectra, fluxes, labels, path, figname):
+        # Store input data
+        self.spectra = spectra
+        self.fluxes = fluxes
+        self.labels = labels
+        self.path = path
+        self.figname = figname
+
+        # Create figure with a custom subplot mosaic
+        fig = plt.figure(constrained_layout=True, figsize=(13, 6))
+        axs = fig.subplot_mosaic([['Left', 'TopRight', 'TopRight2'],
+                                  ['Left', 'Bottom',   'Bottom']],
+                                 gridspec_kw={'width_ratios': [2, 1, 1]})
+
+        # Get wavelength and flux from the first spectrum
+        wave, flux, _, _ = self.spectra.datas[0]
+
+        # Plot observed and model spectra on all panels
+        for panel in ['Left', 'TopRight', 'TopRight2', 'Bottom']:
+            axs[panel].step(wave, flux, alpha=0.5, label='Obs spectra',
+                            lw=1, drawstyle='steps-mid')
+            for flux_, label in zip(fluxes, labels):
+                axs[panel].step(wave, flux_, alpha=0.5,
+                                label=label,
+                                lw=1, drawstyle='steps-mid')
+
+        # ========== LEFT MAIN PANEL ==========
+        axs['Left'].set_xlabel(r'Wavelength ($\AA$)')
+        axs['Left'].set_ylabel(r'Flux ($10^{-17} erg/s/cm^{2}/\AA$)')
+        axs['Left'].set_title(f"{self.spectra.names[0]} , "
+                              f"z = {np.round(self.spectra.redshift, 4)}")
+
+        # Add legend
+        axs['Left'].legend(markerscale=5, frameon=False,
+                           bbox_to_anchor=(0.95, 0.75),
+                           loc='upper right', borderaxespad=0)
+
+        # Format ticks and axis limits
+        axs['Left'].set_xlim(3600, 9550)
+        axs['Left'].minorticks_on()
+        axs['Left'].tick_params(which='major', length=10, width=1.2, direction='in')
+        axs['Left'].tick_params(which='minor', length=5, width=1.2, direction='in')
+        axs['Left'].xaxis.set_ticks_position('both')
+        axs['Left'].yaxis.set_ticks_position('both')
+
+        # Plot vertical markers for known spectral lines (if provided)
+        self.lines_waves = self.spectra.lines_waves
+        self.line_name = self.spectra.line_name
+        if self.lines_waves is not None and self.line_name is not None:
+            for wave1, label in zip(self.lines_waves, self.line_name):
+                axs['Left'].axvline(x=wave1, color='gray', linestyle='--', alpha=0.2)
+                axs['Left'].text(wave1, 0.95, '\n'+label, rotation=90,
+                                 ha='center', va='top', color='k', size=8,
+                                 transform=axs['Left'].get_xaxis_transform())
+
+        # ========== TOP RIGHT PANELS ==========
+        # Panel 1: Zoom on Hβ
+        axs['TopRight'].set_title(r'$H_{\beta}$')
+        xlim = self.lines_waves[self.line_name == 'H_beta'].values
+        wave_O3 = self.lines_waves[self.line_name == 'H_beta'].values
+        resta_O3 = np.abs(wave - wave_O3)
+        flux_O3 = flux[np.argmin(resta_O3)]
+        axs['TopRight'].set_xlim(xlim-50, xlim+50)
+        axs['TopRight'].set_ylim(0, flux_O3/3)
+
+        # Panel 2: Zoom on Hγ
+        axs['TopRight2'].set_title(r'$H_{\gamma}$')
+        xlim1 = self.lines_waves[self.line_name == 'H_gamma'].values
+        wave_hb = self.lines_waves[self.line_name == 'H_gamma'].values
+        resta_hb = np.abs(wave - wave_hb)
+        flux_hb = flux[np.argmin(resta_hb)]
+        axs['TopRight2'].set_xlim(xlim1-30, xlim1+30)
+        axs['TopRight2'].set_ylim(-5, flux_hb + 30)
+
+        # ========== BOTTOM PANEL ==========
+        # Zoom around [Ne III] λ3970 and H11
+        xlim_out = self.lines_waves[self.line_name == 'Ne3_3970'].values
+        xlim_in = self.lines_waves[self.line_name == 'H_11'].values
+        wave_hb = self.lines_waves[self.line_name == 'Ne3_3970'].values
+        resta_hb = np.abs(wave - wave_hb)
+        flux_hb = flux[np.argmin(resta_hb)]
+
+        axs['Bottom'].set_xlim(xlim_in - 50, xlim_out + 50)
+        axs['Bottom'].set_ylim(0, 2*flux_hb)
+        axs['Bottom'].minorticks_on()
+        axs['Bottom'].tick_params(which='major', length=10, width=1.2, direction='in')
+        axs['Bottom'].tick_params(which='minor', length=5, width=1.2, direction='in')
+        axs['Bottom'].xaxis.set_ticks_position('both')
+        axs['Bottom'].yaxis.set_ticks_position('both')
+
+        # Add vertical markers for lines inside the zoomed region
+        submask1 = (self.lines_waves.values == wave_hb)
+        submask2 = (self.lines_waves.values < wave_hb)
+        mask = (submask2 | submask1)
+        for wavelength2, label1 in zip(self.lines_waves[mask], self.line_name[mask]):
+            axs['Bottom'].axvline(x=wavelength2, color='gray', linestyle='--', alpha=0.2)
+            axs['Bottom'].text(wavelength2, 0.95, '\n'+label1, rotation=90,
+                               ha='center', va='top', color='k', size=8,
+                               transform=axs['Bottom'].get_xaxis_transform())
+
+        # ========== SAVE FIGURE ==========
+        save_dir = self.path
+        os.makedirs(save_dir, exist_ok=True)
+        path = f'{save_dir}/{figname}.pdf'
+        plt.savefig(path, format='pdf')
+        plt.show()
