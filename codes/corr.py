@@ -181,6 +181,9 @@ class MW_DUST_CORR:
         # Save corrected data
         self.save_corrected_data(dcorr_fl, dcorr_err)
 
+        IMAGES(self.spectra, [dcorr_fl], ['MW Dust corrected'],
+               f'{proj_DIR}dust/{self.gal_id}', f'MWcorr_{self.gal_id}')
+
     def read_extinction(self):
         """Reads extinction table and applies dust correction."""
         ext_file = f'{proj_DIR}CSV_files/extinction.tbl'
@@ -209,6 +212,13 @@ class MW_DUST_CORR:
                      f"z = {np.round(self.spectra.redshift, 2)}, "
                      f"E$_{{B - V}}$ = {E_BV_table}")
         ax.legend()
+        ax.minorticks_on()
+        ax.tick_params(which='major', length=10, width=1,
+                       direction='in')
+        ax.tick_params(which='minor', length=5, width=1,
+                       direction='in')
+        ax.xaxis.set_ticks_position('both')
+        ax.yaxis.set_ticks_position('both')
         save_dir = f'{proj_DIR}dust/{self.gal_id}'
         os.makedirs(save_dir, exist_ok=True)
         save_path = f'{save_dir}/dcorr_{self.gal_id}.pdf'
@@ -276,7 +286,7 @@ class BALMER_ABS:
         uncorrected data.
         """
         print(f'Reading data for {self.gal_id}')
-        file_path = f'{proj_DIR}dust/dcorr_{self.gal_id}.csv'
+        file_path = f'{proj_DIR}dust/{self.gal_id}/dcorr_{self.gal_id}.csv'
         if os.path.exists(file_path):
             print("Using MW dust corrected data")
             dcorr = pd.read_csv(file_path)
@@ -481,6 +491,9 @@ class BALMER_ABS:
         df = pd.DataFrame({'wave': self.wave, 'flux': new_flux,
                            'sigma': self.sigma})
         df.to_csv(save_path, index=False)
+
+        IMAGES(self.spectra, [new_flux], ['Balmer corrected'],
+               f'{proj_DIR}bal_abs', f'bcorr_{self.gal_id}')
 
         print(f'Saved Balmer Absorption corrected data to: {save_path}')
 
