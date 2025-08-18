@@ -484,12 +484,14 @@ class BALMER_ABS:
 
         print(f'Saved Balmer Absorption corrected data to: {save_path}')
 
+
 class IMAGES:
     """
     A class to generate multi-panel plots of observed and other spectra.
 
     This class creates a figure with four panels:
-        - Left: Full spectrum with observed data, model spectra, and line markers.
+        - Left: Full spectrum with observed data, model spectra, and
+        line markers.
         - TopRight: Zoom on the H_beta line region.
         - TopRight2: Zoom on the H_gamma line region.
         - Bottom: Zoom around [Ne III] λ3970 and H11 with line markers.
@@ -498,7 +500,8 @@ class IMAGES:
     ----------
     spectra : object from class SPECTRA
     fluxes : list of arrays
-        Model or processed flux arrays to be overplotted with the observed spectrum.
+        Model or processed flux arrays to be overplotted with the
+        observed spectrum.
     labels : list of str
         Labels corresponding to each flux in `fluxes`.
     path : str
@@ -548,8 +551,10 @@ class IMAGES:
         # Format ticks and axis limits
         axs['Left'].set_xlim(3600, 9550)
         axs['Left'].minorticks_on()
-        axs['Left'].tick_params(which='major', length=10, width=1.2, direction='in')
-        axs['Left'].tick_params(which='minor', length=5, width=1.2, direction='in')
+        axs['Left'].tick_params(which='major', length=10, width=1.2,
+                                direction='in')
+        axs['Left'].tick_params(which='minor', length=5, width=1.2,
+                                direction='in')
         axs['Left'].xaxis.set_ticks_position('both')
         axs['Left'].yaxis.set_ticks_position('both')
 
@@ -558,7 +563,8 @@ class IMAGES:
         self.line_name = self.spectra.line_name
         if self.lines_waves is not None and self.line_name is not None:
             for wave1, label in zip(self.lines_waves, self.line_name):
-                axs['Left'].axvline(x=wave1, color='gray', linestyle='--', alpha=0.2)
+                axs['Left'].axvline(x=wave1, color='gray', linestyle='--',
+                                    alpha=0.2)
                 axs['Left'].text(wave1, 0.95, '\n'+label, rotation=90,
                                  ha='center', va='top', color='k', size=8,
                                  transform=axs['Left'].get_xaxis_transform())
@@ -593,8 +599,10 @@ class IMAGES:
         axs['Bottom'].set_xlim(xlim_in - 50, xlim_out + 50)
         axs['Bottom'].set_ylim(0, 2*flux_hb)
         axs['Bottom'].minorticks_on()
-        axs['Bottom'].tick_params(which='major', length=10, width=1.2, direction='in')
-        axs['Bottom'].tick_params(which='minor', length=5, width=1.2, direction='in')
+        axs['Bottom'].tick_params(which='major', length=10, width=1.2,
+                                  direction='in')
+        axs['Bottom'].tick_params(which='minor', length=5, width=1.2,
+                                  direction='in')
         axs['Bottom'].xaxis.set_ticks_position('both')
         axs['Bottom'].yaxis.set_ticks_position('both')
 
@@ -602,8 +610,10 @@ class IMAGES:
         submask1 = (self.lines_waves.values == wave_hb)
         submask2 = (self.lines_waves.values < wave_hb)
         mask = (submask2 | submask1)
-        for wavelength2, label1 in zip(self.lines_waves[mask], self.line_name[mask]):
-            axs['Bottom'].axvline(x=wavelength2, color='gray', linestyle='--', alpha=0.2)
+        for wavelength2, label1 in zip(self.lines_waves[mask],
+                                       self.line_name[mask]):
+            axs['Bottom'].axvline(x=wavelength2, color='gray',
+                                  linestyle='--', alpha=0.2)
             axs['Bottom'].text(wavelength2, 0.95, '\n'+label1, rotation=90,
                                ha='center', va='top', color='k', size=8,
                                transform=axs['Bottom'].get_xaxis_transform())
