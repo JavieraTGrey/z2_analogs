@@ -5,11 +5,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from astropy.io import ascii, fits
 from GaussianFitting import fitSpectrum, fitSpectrumMC
 from lmfit import Parameter
 from lmfit.models import GaussianModel, PolynomialModel
-from magE.plotutils import *
 from scipy.ndimage import gaussian_filter1d
 import time
 
@@ -141,7 +139,8 @@ class REDUC_LINES:
         # dataframe setup
         columns = ['sigma_v_narrow', 'sigma_v_broad']
         for label in auroral_lines:
-            columns += [f'{label}_narrow_amplitude', f'{label}_broad_amplitude']
+            columns += [f'{label}_narrow_amplitude',
+                        f'{label}_broad_amplitude']
         columns += ['O2_7333_narrow_amplitude', 'O2_7333_broad_amplitude']
 
         df = pd.DataFrame(columns=columns)
@@ -260,8 +259,6 @@ class REDUC_LINES:
                 name_narrow = f"{label}_narrow_amplitude"
                 name_broad = f"{label}_broad_amplitude"
                 row[name_narrow] = float(fit.params[name_narrow].value)
-                print(label)
-                print(fit.params[name_narrow].value, fit.params[name_broad].value)
                 row[name_broad] = float(fit.params[name_broad].value)
 
         df.loc[len(df)] = row
