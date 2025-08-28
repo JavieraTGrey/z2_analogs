@@ -29,6 +29,10 @@ def log_method_call(func):
 
 
 class REDUC_LINES:
+    """
+    Class to model the emission line fluxes,
+    Receives an instance of the class SPECTRALDATA
+    """
     def __init__(self, spectra):
         self.spectra = spectra
         self.model1IT = None
@@ -52,6 +56,10 @@ class REDUC_LINES:
             self.wave, self.flux, self.sigma, _ = self.spectra.datas[0]
 
     def fit_spectra(self, show_Plot=False, broad=True, nfev=None):
+        """
+        Fits the spectra with a composite model between a polinomial and
+        multiple gaussians for each emission line.
+        """
 
         sm_noise = gaussian_filter1d(self.sigma, sigma=25)
 
@@ -63,8 +71,13 @@ class REDUC_LINES:
         self.model1IT = fit
         return fit
 
+    @log_method_call
     def fit_MC(self, numMC=2, showPlot=False, broad=True, nfev=None):
-
+        """
+        Function to create a MC loop on the fit_spectra function.
+        Saves the information of each iteration in a pandas DataFrame that is
+        returned at the end of the loop
+        """
         if self.model1IT is None:
             print('Calculating the first initial params')
             fit = fitSpectrum(self.wave, self.flux, self.sigma,
@@ -121,6 +134,9 @@ class REDUC_LINES:
                           index=False)
 
     def fit_auroral(self, wave, flux, showplot=False, return_comps=False):
+        """
+        Makes special fitting on auroral lines
+        """
         stamps, comps = [], []
         params = pd.read_csv(f'{proj_DIR}lines/{self.spectra.gal_id}_iter.csv')
 
@@ -314,8 +330,11 @@ class REDUC_LINES:
         else:
             return df
 
-    def fit_MC_auroral(self, numMC=400):
-
+    @log_method_call
+    def fit_MC_auroral(self, numMC=400, showPlot=False):
+        """
+        MC fitting loop on auroral emission lines
+        """
         columns = ['sigma_v_narrow', 'sigma_v_broad']
 
         auroral_lines = ['N2_5756', 'O1_6363',
@@ -328,29 +347,22 @@ class REDUC_LINES:
             columns.append(name1)
             columns.append(name2)
 
-        df = pd.DataFrame(columns=columns)
+        info = pd.DataFrame(columns=columns)
 
         for i in range(numMC):
             # Create a data set with random offsets scaled by uncertainties
 
             yoff = np.random.randn(len(self.flux)) * self.sigma
 
-            # res = self.fit_auroral(wave, flux + yoff, self)
-            res = self.fit_auroral(self.wave, self.flux + yoff)
+            df = self.fit_auroral(self.wave, self.flux + yoff,
+                                  showplot=showPlot)
 
-            df = pd.concat([df, res], ignore_index=True)
+            info = pd.concat([info, df], ignore_index=True)
 
-        return df
-
-    def fit_MC_auroral2(self, return_comps=False, numMC_=100):
-        _, flux, _, _ = self.datas[0]
-
-        info = self.fitSpectrumMC_auroral(numMC=numMC_)
-
-        df = pd.DataFrame(columns=['ID', 'mass', 'z', 'name', 'flux',
-                                   'fluxerr',
-                                   'narrow_flux', 'narrow_fluxerr',
-                                   'broad_flux', 'broad_fluxerr'])
+        res = pd.DataFrame(columns=['ID', 'mass', 'z', 'name', 'flux',
+                                    'fluxerr',
+                                    'narrow_flux', 'narrow_fluxerr',
+                                    'broad_flux', 'broad_fluxerr'])
 
         auroral_lines = ['N2_5756', 'O1_6363',
                          'O3_4363', 'S3_6312',
@@ -360,9 +372,9 @@ class REDUC_LINES:
             narrow_ = np.asarray(info[label+"_narrow_amplitude"])
             broad_ = np.asarray(info[label+"_broad_amplitude"])
             flux = narrow_ + broad_
-            row = {'ID': self.names[0],
-                   'mass': self.mass,
-                   'z': self.redshift,
+            row = {'ID': self.spectra.names[0],
+                   'mass': self.spectra.mass,
+                   'z': self.spectra.redshift,
                    'name': label,
                    'flux': np.median(flux),
                    'fluxerr': np.std(flux),
@@ -370,16 +382,16 @@ class REDUC_LINES:
                    'narrow_fluxerr': np.std(info[label+"_narrow_amplitude"]),
                    'broad_flux': np.median(info[label+"_broad_amplitude"]),
                    'broad_fluxerr': np.std(info[label+"_broad_amplitude"])}
-            df.loc[len(df)] = row
+            res.loc[len(res)] = row
 
         narrow_1 = np.asarray(info['O2_7322_narrow_amplitude'])
         broad_1 = np.asarray(info["O2_7322_broad_amplitude"])
         narrow_2 = np.asarray(info["O2_7333_narrow_amplitude"])
         broad_2 = np.asarray(info["O2_7333_broad_amplitude"])
         flux = narrow_1 + broad_1 + narrow_2 + broad_2
-        row = {'ID': self.names[0],
-               'mass': self.mass,
-               'z': self.redshift,
+        row = {'ID': self.spectra.names[0],
+               'mass': self.spectra.mass,
+               'z': self.spectra.redshift,
                'name': 'O2_7322_7333',
                'flux': np.median(flux),
                'fluxerr': np.std(flux),
@@ -387,10 +399,10 @@ class REDUC_LINES:
                'narrow_fluxerr': np.std(narrow_1 + narrow_2),
                'broad_flux': np.median(broad_1 + broad_2),
                'broad_fluxerr': np.std(broad_1 + broad_2)}
-        df.loc[len(df)] = row
+        res.loc[len(res)] = row
 
-        path = '/Users/javieratoro/Desktop/proyecto 2024-2/lines/'
-        df.to_csv(path + f'{self.names[0][:5]}_auroral.csv', index=False)
-        info.to_csv(path + f'{self.names[0][:5]}_auroral_model.csv',
+        res.to_csv(f'{proj_DIR}lines/{self.spectra.gal_id}_auroral_model.csv',
+                   index=False)
+        info.to_csv(f'{proj_DIR}lines/{self.spectra.gal_id}_auroral_iter.csv',
                     index=False)
-        return df
+        return res

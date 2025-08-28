@@ -58,6 +58,7 @@ class SPECTRALDATA:
         self.line_wave_or = self.line_list['vacuum_wave']
         self.lines_waves = self.line_wave_or * (1 + self.redshift)
         self.line_name = self.line_list['name']
+        self.gal_id = self.names[0][:5]
 
     em_path = f'{proj_DIR}CSV_files/emission_lines.csv'
 
@@ -143,10 +144,10 @@ class MW_DUST_CORR:
         self.Hb = rel_Hb
         self.plot = plot
         self.spectra = spectra
+        self.gal_id = self.spectra.gal_id
 
         # Unpack spectrum data
         self.wl, self.fl, self.err, _ = self.spectra.datas[0]
-        self.gal_id = self.spectra.names[0][:5]
         self.MW_dust_corr()
 
     @log_method_call
