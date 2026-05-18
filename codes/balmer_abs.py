@@ -7,7 +7,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 from lmfit import Parameter
 from lmfit.models import GaussianModel, PolynomialModel
-from uncertainties import ufloat
 import os
 import pandas as pd
 
@@ -152,7 +151,8 @@ def isolate_emission_line(class_, line, window, datas):
 
     # plt.figure(figsize=(10, 6))
     # plt.step(wave, flux, label='Data', color='black')
-    # plt.step(isolated_wave, isolated_flux, label='Isolated Line', color='red')
+    # plt.step(isolated_wave, isolated_flux, label='Isolated Line',
+    #          color='red')
     # plt.xlabel('Wavelength (Å)')
     # plt.ylabel('Flux')
     # plt.title(f'Isolated Emission Line: {line}')
@@ -239,19 +239,18 @@ def model(class_, label, datas, sigmas):
 
 def model_mcmc(class_, label, stamp):
 
-    wave, flux, f_err =  stamp[0], stamp[1], stamp[2]
+    wave, flux, f_err = stamp[0], stamp[1], stamp[2]
     z, w_center = class_.redshift, class_.linelist_dict[label]
 
     mu = w_center * (1 + z)
     sigma = w_center * (1 + z) * 550 / 3e5
 
-    mask = np.isfinite(flux) & ((wave < mu - 0.5*sigma) | (wave > mu + 0.5*sigma))
-
+    step = 0.5*sigma
+    mask = np.isfinite(flux) & ((wave < mu - step) | (wave > mu + step))
 
     def absorption(w, A, m, n):
         output = -A * np.exp(-((mu - w) ** 2) / (2 * sigma**2)) + m * w + n
         return output
-
 
     #  Test one fit
     p0 = 5.0, 0.0, 5.0
@@ -262,7 +261,8 @@ def model_mcmc(class_, label, stamp):
     #
 
     N_mc = 100
-    f_mc = np.random.normal(loc=flux[mask], scale=f_err[mask], size=(N_mc, mask.sum()))
+    f_mc = np.random.normal(loc=flux[mask],
+                            scale=f_err[mask], size=(N_mc, mask.sum()))
     popt_mc = np.zeros((N_mc, 3))
     for i in range(N_mc):
         popt, pcov = curve_fit(absorption, wave[mask], f_mc[i], p0)
@@ -290,67 +290,66 @@ def neg_gauss(class_, line, w, A):
 
 
 def absorption_func(class_, line, w, A, m, n):
-        gauss = neg_gauss(class_, line, w, A)
-        output = gauss + m * w + n
-        return output
+    gauss = neg_gauss(class_, line, w, A)
+    output = gauss + m * w + n
+    return output
 
-def save_corrected_data(class_, new_flux):
+
+def save_corrected_data(class_, data, new_flux):
     """
     Saves the corrected data to a CSV file,
     creating the directory if needed.
     """
     # Define the directory and file path
     save_dir = f'{proj_DIR}bal_abs'
-    save_path = f'{save_dir}/bcorr_{class_.gal_id}.csv'
+    save_path = f'{save_dir}/bcorr_{class_.gal_id}_new.csv'
 
     # Create the directory if it doesn't exist
     os.makedirs(save_dir, exist_ok=True)
 
     # Create and save DataFrame
-    df = pd.DataFrame({'wave': class_.wave, 'flux': new_flux,
-                        'sigma': class_.sigma})
+    df = pd.DataFrame({'wave': data[0], 'flux': new_flux,
+                       'sigma': data[2]})
     df.to_csv(save_path, index=False)
-
 
     print(f'Saved Balmer Absorption corrected data to: {save_path}')
 
-# =============================================================================
-#
-# Program
-#
-# =============================================================================
 
-# get EW estimated from other hydrogen lunes, with fixed sigma
-# with that you can create the gaussian fro h alpha and h beta
-# correct the spectra
-# make some estimations about the change in fluxes for h alpha and h beta
-if __name__ == '__main__':
-    J0328_SPEC = {
-                 'DIR': '/Users/javieratoro/Desktop/thesis/BAADE_DATA/testing/35-J0328/',
-                 'FILES': ['no_very_flats/J0328_NO_VERY_FLATS_tellcorr.fits'],
-                 'redshift': 0.086,
-                 'names': ['J0328+0031'],
-                 'mass': 9.8
-                 }
-    J0328 = SPECTRALDATA(J0328_SPEC)
-    Z = REDSHIFT(J0328)
+def balmer_absorption_correction(info):
+    """
+    Applies the Balmer absorption correction to the flux data using the
+    MCMC results from the model fitting.
+
+    Parameters:
+    - class_: The spectral data class.
+    - data: The input data.
+    - sigmas: The sigma values.
+    - emcee: The MCMC results.
+
+    Returns:
+    - A message indicating the correction has been applied and results saved.
+    """
+    # Implementation for applying Balmer absorption correction
+    class_ = SPECTRALDATA(info)
+    _ = REDSHIFT(class_)
     balmer_lines = ['H_gamma', 'H_delta',
                     'H_epsilon', 'H_8', 'H_9', 'H_10', 'H_11', 'H_12', 'H_13', 'H_14']
+
     windows = [50, 50, 50, 50, 50, 40, 40, 15, 40, 40]
     fits, comps, stamps, emcee = [], [], [], []
-    data = read_data(J0328)
+    data = read_data(class_)
     flux = data[1]
     corrected_flux = flux.copy()
-    sigmas = first_sigma_est(J0328, data, plot=True)
+    sigmas = first_sigma_est(class_, data, plot=True)
     for line, window in zip(balmer_lines, windows):
-        masked_data = mask_nonuse_emission_line(J0328, sigmas, line,
+        masked_data = mask_nonuse_emission_line(class_, sigmas, line,
                                                 [data[0], corrected_flux,
                                                  data[2]])
-        isolated_data = isolate_emission_line(J0328, line, window=window,
+        isolated_data = isolate_emission_line(class_, line, window=window,
                                               datas=masked_data)
         stamps.append(isolated_data)
 
-        fit = model(J0328, line, isolated_data, sigmas)
+        fit = model(class_, line, isolated_data, sigmas)
         fits.append(fit)
         comp = fit.eval_components(x=isolated_data[0])
         comps.append(comp)
@@ -359,7 +358,7 @@ if __name__ == '__main__':
 
         corrected_flux -= corr[f'{line}_']
 
-        model_ = model_mcmc(J0328, line, isolated_data)
+        model_ = model_mcmc(class_, line, isolated_data)
         emcee.append(model_)
 
     plt.figure(figsize=(14, 4*len(balmer_lines)))
@@ -374,7 +373,6 @@ if __name__ == '__main__':
         wave_to_plot = np.linspace(np.min(stamps[i][0]),
                                    np.max(stamps[i][0]),
                                    100)
-
 
         # Left panel: main fit
         plt.subplot(len(balmer_lines), 2, 2*i + 1)
@@ -392,13 +390,18 @@ if __name__ == '__main__':
         plt.ylabel('Flux')
         param_key = f"{line}_height"
 
-        plt.title(
-            f"Absorption Line: {line} \n"
-            f"A: {-1*fits[i].params[param_key].value:.2f} ± {fits[i].params[param_key].stderr:.2f}"
+        A_val = -fits[i].params[param_key].value
+        A_err = fits[i].params[param_key].stderr
 
-        )
+        if A_err is None:
+            A_text = f"A: {A_val:.2f} ± N/A"
+        else:
+            A_text = f"A: {A_val:.2f} ± {A_err:.2f}"
+
+        plt.title(f"Absorption Line: {line}\n{A_text}")
         plt.legend()
-        plt.ylim(5, 20)
+        plt.ylim(np.min(comps[i][line + '_'] + comps[i]['polynomial']) - 2,
+                 np.max(comps[i][line + '_'] + comps[i]['polynomial']) + 2)
 
         # Right panel: MC fits
         plt.subplot(len(balmer_lines), 2, 2*i + 2)
@@ -408,7 +411,7 @@ if __name__ == '__main__':
         for j in range(100):
             plt.plot(
                 wave_to_plot,
-                absorption_func(J0328, line, wave_to_plot, *popt_mc[j]),
+                absorption_func(class_, line, wave_to_plot, *popt_mc[j]),
                 "k-",
                 alpha=0.05
             )
@@ -423,13 +426,110 @@ if __name__ == '__main__':
         plt.legend()
 
     plt.tight_layout()
-    plt.savefig(f'{proj_DIR}bal_abs/balmer_fits_J0328.pdf', format='pdf')
+    plt.savefig(f'{proj_DIR}bal_abs/balmer_fits_{class_.gal_id}_.pdf',
+                format='pdf')
     plt.show()
 
-absorption_beta = neg_gauss(J0328, 'H_beta', data[0], emcee[0][0])
-absorption_alpha = neg_gauss(J0328, 'H_alpha', data[0], emcee[0][0])
-absorption = absorption_alpha + absorption_beta
+    absorption_beta = neg_gauss(class_, 'H_beta', data[0], emcee[0][0])
+    absorption_alpha = neg_gauss(class_, 'H_alpha', data[0], emcee[0][0])
+    absorption = absorption_alpha + absorption_beta
 
-corrected_flux += absorption
+    corrected_flux += absorption
 
-save_corrected_data(J0328, corrected_flux)
+    save_corrected_data(class_, data, corrected_flux)
+
+    return f'Balmer absorption correction applied and results saved for {class_.gal_id}.'
+
+
+# =============================================================================
+#
+# Program
+#
+# =============================================================================
+
+# get EW estimated from other hydrogen lunes, with fixed sigma
+# with that you can create the gaussian fro h alpha and h beta
+# correct the spectra
+# make some estimations about the change in fluxes for h alpha and h beta
+if __name__ == '__main__':
+
+    J0328_SPEC = {
+                 'DIR': '/Users/javieratoro/Desktop/thesis/BAADE_DATA/testing/35-J0328/',
+                 'FILES': ['no_very_flats/J0328_NO_VERY_FLATS_tellcorr.fits'],
+                 'redshift': 0.086,
+                 'names': ['J0328+0031'],
+                 'mass': 9.8
+                 }
+
+    J0020_SPECTRA= {
+                    'DIR':'/Users/javieratoro/Desktop/thesis/BAADE_DATA/testing/10-J0020/',
+                    'FILES': ['no_very_flats/J0020_NO_VERY_FLATS_tellcorr.fits'],
+                    'redshift': 0.106,
+                    'names':['J0020+0030'],
+                    'mass':9.6
+    }
+
+    J0203_SPECTRA= {
+    'DIR':'/Users/javieratoro/Desktop/thesis/BAADE_DATA/testing/25-J0203/',
+    'FILES': ['no_very_flats/J0203_NO_VERY_FLATS_tellcorr.fits'],# 'twilight/J0203_TWILIGHT_tellcorr.fits'],
+     'redshift': 0.156,
+     'names':['J0203+0035'],
+     'mass':9.96
+    }
+
+    J0243_SPECTRA= {
+    'DIR':'/Users/javieratoro/Desktop/thesis/BAADE_DATA/testing/28-J0243/',
+    'FILES': ['no_very_flats/J0243_NO_VERY_FLATS_tellcorr.fits'],# 'twilight/J0243_TWILIGHT_tellcorr.fits'],
+     'redshift': 0.134,
+     'names':['J0243+0111'],
+     'mass':9.7
+    }
+
+    J0333_SPECTRA= {
+        'DIR':'/Users/javieratoro/Desktop/thesis/BAADE_DATA/testing/36-J0033/',
+        'FILES': ['no_very_flats/J0033_NO_VERY_FLATS_tellcorr.fits'], #'twilight/J0033_TWILIGHT_tellcorr.fits'],
+        'redshift': 0.194,
+        'names':['J0333+0017'],
+        'mass':9.9
+    }
+
+    J0404_SPECTRA= {
+        'DIR':'/Users/javieratoro/Desktop/thesis/BAADE_DATA/testing/38-J0404/',
+        'FILES': ['no_very_flats/J0404_NO_VERY_FLATS_tellcorr.fits', 'twilight/J0404_TWILIGHT_tellcorr.fits'],
+        'redshift': 0.066,
+        'names':['J0404+0538'],
+        'mass':10.2
+    }
+
+    J2204_SPECTRA= {
+        'DIR':'/Users/javieratoro/Desktop/thesis/BAADE_DATA/testing/2-J2204/',
+        'FILES': ['no_very_flats/J2204_NO_VERY_tellcorr.fits', 'twilight/J2204_TWILIGHT_tellcorr.fits'],
+        'redshift': 0.185,
+        'names':['J2204+0058'],
+        'mass':10.16
+    }
+
+    J2258_SPECTRA= {
+                    'DIR': '/Users/javieratoro/Desktop/thesis/BAADE_DATA/testing/6-J2258/',
+                    'FILES': ['twilight/J2258_TWILIGHT_tellcorr.fits'], #'no_very_flats/J2258_NO_VERY_FLATS_tellcorr.fits'],
+                    'redshift': 0.094,
+                    'names': ['J2258+0056'],
+                    'mass': 9.6
+    }
+
+    J2336_SPECTRA= {
+        'DIR':'/Users/javieratoro/Desktop/thesis/BAADE_DATA/testing/7-J2336/',
+        'FILES': ['no_very_flats/J2336_NO_VERY_BLUE_tellcorr.fits', 'twilight/J2336_TWILIGHT_tellcorr.fits'],
+        'redshift':0.17047114835326904,
+        'names':['J2336-0042'],
+        'mass':9.9
+    }
+    # balmer_absorption_correction(J0328_SPEC)
+    # balmer_absorption_correction(J0020_SPECTRA)
+    # balmer_absorption_correction(J0203_SPECTRA)
+    # balmer_absorption_correction(J0243_SPECTRA)
+    # balmer_absorption_correction(J0333_SPECTRA)
+    # balmer_absorption_correction(J0404_SPECTRA)
+    # balmer_absorption_correction(J2204_SPECTRA)
+    # balmer_absorption_correction(J2258_SPECTRA)
+    # balmer_absorption_correction(J2336_SPECTRA)
