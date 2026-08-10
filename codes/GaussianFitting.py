@@ -5,6 +5,107 @@ from lmfit.parameter import Parameter
 import pandas as pd
 
 
+def fitSpectrum_ONE(lams, flux, label, flux_error, linelist, z_init=0,
+                    weights=None, showPlot=False, params=None,
+                    broad=True, nfev=None):
+
+    if hasattr(lams, 'value'):
+        lams = lams.value
+    if hasattr(flux, 'value'):
+        flux = flux.value
+    if hasattr(flux_error, 'value'):
+        flux_error = flux_error.value
+
+    # Narrow component
+    narrow_gaussian = GaussianModel(prefix=label+'_narrow_')
+
+    if broad is True:
+        broad_gaussian = GaussianModel(prefix=label+'_broad_')
+
+    # Create a polynomial model for the continuum
+    polydeg = 7
+    polynomial = PolynomialModel(degree=polydeg)
+
+    # Combine models
+    if broad is True:
+        sum_of_gaussians = narrow_gaussian + broad_gaussian
+    else:
+        sum_of_gaussians = narrow_gaussian
+
+    comp_mult = sum_of_gaussians + polynomial
+    pars_mult = comp_mult.make_params()
+
+    if params is None:
+        pars_mult.add(name='z', value=z_init, vary=True)
+
+        # Add the 'sigma_v' parameter to tie narrow sigmas together
+        pars_mult.add(name='sigma_v_narrow', value=50, min=20, max=70)
+
+        # Loop through emission lines to define parameters for narrow and broad
+        lam = linelist[label]
+        for param in ['center', 'amplitude', 'sigma']:
+            narrow_key = f'{label}_narrow_{param}'
+            if param == 'center':
+                value = lam
+                vary = False
+                expr = f'{lam:6.2f}*(1+z)'
+            elif param == 'amplitude':
+                value = 1
+                vary = True
+                expr = None
+            elif param == 'sigma':
+                vary = True
+                expr = f'(sigma_v_narrow/3e5)*{label}_narrow_center'
+            pars_mult[narrow_key] = Parameter(name=narrow_key, value=value,
+                                              vary=vary, expr=expr,
+                                              min=0.0)
+
+        bright_lines = ['O2_3725', 'O2_3727', 'H_alpha', 'H_beta', 'H_gamma',
+                        'O3_5008', 'O3_4959', 'N2_6550', 'N2_6585', 'S2_6716',
+                        'S2_6730']
+        if broad is True:
+            pars_mult.add(name='sigma_v_broad', value=90, min=70, max=500)
+
+            if label in bright_lines:
+                lam = linelist[label]
+                for param in ['center', 'amplitude', 'sigma']:
+                    broad_key = f'{label}_broad_{param}'
+                    if param == 'center':
+                        value = lam
+                        vary = False
+                        expr = f'{lam:6.2f}*(1+z)'
+                    elif param == 'amplitude':
+                        value = 0.3
+                        vary = True
+                        expr = None
+                    elif param == 'sigma':
+                        vary = True
+                        expr = f'(sigma_v_broad/3e5)*{label}_broad_center'
+                    pars_mult[broad_key] = Parameter(name=broad_key,
+                                                     value=value, min=0.0,
+                                                     vary=vary, expr=expr)
+
+        for i in range(polydeg+1):
+            pars_mult[f'c{i:1.0f}'].set(value=0)
+
+    else:
+        pars_mult = params
+
+    if weights is None:
+        out_comp_mult = comp_mult.fit(flux, pars_mult, x=lams,
+                                      nan_policy='omit', max_nfev=nfev)
+    else:
+        out_comp_mult = comp_mult.fit(flux, pars_mult, x=lams,
+                                      weights=weights, nan_policy='omit',
+                                      max_nfev=nfev)
+
+    if showPlot:
+        plot_spec_fit(lams, flux, flux_error, linelist, z=None,
+                      model=out_comp_mult, broad=broad)
+
+    return out_comp_mult
+
+
 def fitSpectrum(lams, flux, flux_error, linelist, z_init=0,
                 weights=None, showPlot=False, params=None,
                 broad=True, nfev=None):
@@ -28,7 +129,7 @@ def fitSpectrum(lams, flux, flux_error, linelist, z_init=0,
             broad_gaussians.append(broad_gaussian)
 
     # Create a polynomial model for the continuum
-    polydeg = 5
+    polydeg = 7
     polynomial = PolynomialModel(degree=polydeg)
 
     # Combine models
@@ -46,7 +147,8 @@ def fitSpectrum(lams, flux, flux_error, linelist, z_init=0,
     pars_mult = comp_mult.make_params()
 
     if params is None:
-        pars_mult.add(name='z', value=z_init, vary=False)
+        pars_mult.add(name='z', value=z_init, vary=True,  min=z_init - 1e-4,
+                      max=z_init + 1e-4)
 
         # Add the 'sigma_v' parameter to tie narrow sigmas together
         pars_mult.add(name='sigma_v_narrow', value=50, min=20, max=70)
@@ -58,7 +160,7 @@ def fitSpectrum(lams, flux, flux_error, linelist, z_init=0,
                 narrow_key = f'{label}_narrow_{param}'
                 if param == 'center':
                     value = lam
-                    vary = True
+                    vary = False
                     expr = f'{lam:6.2f}*(1+z)'
                 elif param == 'amplitude':
                     value = 1
@@ -83,7 +185,7 @@ def fitSpectrum(lams, flux, flux_error, linelist, z_init=0,
                     broad_key = f'{label}_broad_{param}'
                     if param == 'center':
                         value = lam
-                        vary = True
+                        vary = False
                         expr = f'{lam:6.2f}*(1+z)'
                     elif param == 'amplitude':
                         value = 0.3
@@ -154,7 +256,7 @@ def plot_spec_fit(lams, flux, flux_error, linelist, z=None, model=None,
 
     for label in linelist.keys():
         obs_lam = linelist[label] * (1+z)
-        ax.axvline(obs_lam, linestyle='--', linewidth=1, color='k', lw=0.5)
+        ax.axvline(obs_lam, linestyle='--', linewidth=1, color='grey', lw=0.5)
         ax.text(obs_lam, 0.99, '\n'+label, rotation=90, ha='center', va='top',
                 color='k', size=8, transform=ax.get_xaxis_transform())
 

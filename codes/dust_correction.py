@@ -78,9 +78,9 @@ def linfunc(x, slope):
 
 def E_BV_(name):
 
-    DIR = '/Users/javieratoro/Desktop/proyecto 2024-2/'
-    lines = pd.read_csv(DIR + 'CSV_files/emission_lines.csv')
-    fluxes = pd.read_csv(DIR + f'lines/{name}_master_model.csv')
+    DIR = '/Users/javieratoro/Desktop/thesis/proyecto 2024-2/'
+    lines = pd.read_csv(DIR + 'CSV_files/emission_line1.csv')
+    fluxes = pd.read_csv(DIR + f'lines/{name}_line_fluxes_parts.csv')
 
     Ha_w = lines[lines['name'] == 'H_alpha']['vacuum_wave'].values[0]
     Hb_w = lines[lines['name'] == 'H_beta']['vacuum_wave'].values[0]
@@ -125,7 +125,7 @@ def E_BV_(name):
     E_BV_ERR = np.sqrt(np.diag(pcov))[0]/0.4
     decrement_dict = {'galname': name,
                       'Ha/Hb': (Ha_flux / Hb_flux).nominal_value,
-                      'Ha/Hb_err': (Hb_flux / Hb_flux).std_dev,
+                      'Ha/Hb_err': (Ha_flux / Hb_flux).std_dev,
                       'Hg/Hb': (Hc_flux / Hb_flux).nominal_value,
                       'Hg/Hb_err': (Hc_flux / Hb_flux).std_dev,
                       'Hd/Hb': (Hd_flux / Hb_flux).nominal_value,
@@ -135,53 +135,38 @@ def E_BV_(name):
                       }
 
     decrement_dict_pd = pd.DataFrame(data=decrement_dict, index=[0])
-    save_catalog(name, decrement_dict_pd, DIR + '/results/bal_decrements.csv')
+    save_catalog(name, decrement_dict_pd, DIR + '/results/bal_decrements_parts.csv')
     return E_BV, E_BV_ERR
 
 
 def f_int(wl, line, E_BV):
     if type(wl) is not np.ndarray:
         wl = np.asarray(wl)
+    print(wl, line, )
     return line * 10 ** (0.4 * E_BV * k_cal(wl))
 
 
 def get_flux(name, line):
-    DIR = '/Users/javieratoro/Desktop/proyecto 2024-2/'
+    DIR = '/Users/javieratoro/Desktop/thesis/proyecto 2024-2/'
 
-    bright_lines = ['O2_3725', 'O2_3727', 'H_alpha', 'H_beta',
-                    'H_gamma', 'O3_5008', 'O3_4959', 'N2_6550',
-                    'N2_6585', 'S2_6716', 'S2_6730']
+    fluxes = pd.read_csv(DIR + 'lines/magE2024_master_au_parts.csv')
 
-    auroral_lines = ['N2_5756', 'O1_6363',
-                     'O3_4363', 'S3_6312',
-                     'O2_7322', 'O2_7333',
-                     'O2_7322_7333']
-
-    fluxes = pd.read_csv(DIR + f'lines/{name}_master_model.csv')
-
-    if line in auroral_lines:
-        narrow_ = fluxes[line + '_narrow_amplitude'].values
-        broad_ = fluxes[line + '_broad_amplitude'].values
-        flux = narrow_ + broad_
-    else:
-        narrow = fluxes[line + '_narrow'].values
-        flux = narrow
-        if line in bright_lines:
-            broad = fluxes[line + '_broad'].values
-            flux += broad
-
-    return flux
+    for id in fluxes['ID'].values:
+        if id[:5] == name:
+            name_ = id
+    flux = fluxes[fluxes['ID'] == name_][f'{line}_flux'].values[0]
+    fluxerr = fluxes[fluxes['ID'] == name_][f'{line}_fluxerr'] .values[0]
+    return flux, fluxerr
 
 
 def save_fluxes():
-    DIR = '/Users/javieratoro/Desktop/proyecto 2024-2/'
-    lines = pd.read_csv(DIR + 'CSV_files/emission_lines.csv')
+    DIR = '/Users/javieratoro/Desktop/thesis/proyecto 2024-2/'
+    lines = pd.read_csv(DIR + 'CSV_files/emission_line1.csv')
 
-    names = ['J0020', 'J0203', 'J0243', 'J0033',
-             'J2204', 'J2258', 'J2336',
-             'J0023', 'J0136']
+    names = ['J0023', 'J0136', 'J0020', 'J0203', 'J0243', 'J0333',
+             'J0404', 'J2204', 'J2258', 'J2336', 'J0328']
 
-    columns_ = ['ID', 'mass', 'z']
+    columns_ = ['ID', 'mass', 'z_red', 'z_blue']
     for line in lines['name']:
         columns_.append(line + '_flux')
         columns_.append(line + '_fluxerr')
@@ -189,21 +174,22 @@ def save_fluxes():
     df = pd.DataFrame(columns=columns_)
 
     for name in names:
-        data = pd.read_csv(DIR + f'lines/{name}.csv')
+        data = pd.read_csv(DIR + f'lines/{name}/{name}_model_parts.csv')
         all_rows = {'ID': data['ID'][0], 'mass': data['mass'][0],
-                    'z': data['z'][0]}
+                    'z_red': data['z_red'][0], "z_blue": data['z_blue'][0]}
         for line in lines['name']:
             print(f'Correcting line {line}')
             wl = lines[lines['name'] == line]['vacuum_wave'].values
             E_BV, _ = E_BV_(name)
-            flux = get_flux(name, line)
+            flux, fluxerr = get_flux(name, line)
             f_corr = f_int(wl, flux, E_BV)
-            all_rows[line + '_flux'] = np.mean(f_corr)
-            all_rows[line + '_fluxerr'] = np.std(f_corr)
+            f_corr_err = f_int(wl, fluxerr, E_BV)
+            all_rows[line + '_flux'] = f_corr[0]
+            all_rows[line + '_fluxerr'] = f_corr_err[0]
 
         df.loc[-1] = all_rows
         df.index = df.index + 1
-    df.to_csv(DIR + 'lines/magE2024_master_Dcorr.csv')
+    df.to_csv(DIR + 'lines/magE2024_master_Dcorr_parts.csv')
 
 
 save_fluxes()

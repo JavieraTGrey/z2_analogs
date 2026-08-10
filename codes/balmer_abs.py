@@ -268,7 +268,7 @@ def model_mcmc(class_, label, stamp):
         popt, pcov = curve_fit(absorption, wave[mask], f_mc[i], p0)
         popt_mc[i] = popt
 
-    A_mean = np.mean(popt_mc[:, 0])
+    A_mean = np.median(popt_mc[:, 0])
     A_err = np.std(popt_mc[:, 0])
 
     EW_mc = (
@@ -277,7 +277,7 @@ def model_mcmc(class_, label, stamp):
         / (1 + z)
     )
 
-    return A_mean, A_err, np.mean(EW_mc), np.std(EW_mc), mask, popt_mc
+    return A_mean, A_err, np.median(EW_mc), np.std(EW_mc), mask, popt_mc
 
 
 def neg_gauss(class_, line, w, A):
@@ -293,6 +293,24 @@ def absorption_func(class_, line, w, A, m, n):
     gauss = neg_gauss(class_, line, w, A)
     output = gauss + m * w + n
     return output
+
+
+def neg_gauss_EW(class_, line, w, emcee, EW_, num):
+    w_center = class_.linelist_dict[line]
+    z = class_.redshift
+    mu = w_center * (1 + z)
+    sigma = w_center * (1 + z) * 550 / 3e5
+    popt_mc = emcee[5]
+
+    m = popt_mc[num, 1]
+    n = popt_mc[num, 2]
+
+    continuum_at_mu = m * mu + n
+    A = (EW_ * (1 + class_.redshift)
+        * continuum_at_mu
+        / (np.sqrt(2*np.pi) * sigma) )
+    output1 = -A * np.exp(-((mu - w) ** 2) / (2 * sigma**2))
+    return output1
 
 
 def save_corrected_data(class_, data, new_flux):
@@ -337,6 +355,7 @@ def balmer_absorption_correction(info):
 
     windows = [50, 50, 50, 50, 50, 40, 40, 15, 40, 40]
     fits, comps, stamps, emcee = [], [], [], []
+    EW_lines = []
     data = read_data(class_)
     flux = data[1]
     corrected_flux = flux.copy()
@@ -354,16 +373,38 @@ def balmer_absorption_correction(info):
         comp = fit.eval_components(x=isolated_data[0])
         comps.append(comp)
 
-        corr = fit.eval_components(x=data[0])
-
-        corrected_flux -= corr[f'{line}_']
-
         model_ = model_mcmc(class_, line, isolated_data)
         emcee.append(model_)
 
-    plt.figure(figsize=(14, 4*len(balmer_lines)))
+    for i, _ in enumerate(balmer_lines):
+        EW_line = emcee[i][2]
+        EW_lines.append(EW_line)
+
+    EW_med = np.median(EW_lines[:5])
 
     for i, line in enumerate(balmer_lines):
+        gaus_ew = neg_gauss_EW(class_, line, data[0], emcee[i], EW_med, i)
+        gaus_2  = neg_gauss_EW(class_, line, data[0], emcee[i], EW_lines[i], i)
+        if np.min(gaus_2) < np.min(gaus_ew):
+            param_key = f"{line}_height"
+            A_val = fits[i].params[param_key].value
+            corrected_flux -= gaus_2
+        else:
+            corrected_flux -= gaus_ew
+
+    absorption_beta = neg_gauss_EW(class_, 'H_beta', data[0], emcee[0], EW_med, 0)
+    absorption_alpha = neg_gauss_EW(class_, 'H_alpha', data[0], emcee[0], EW_med, 0)
+    absorption = absorption_alpha + absorption_beta
+
+    corrected_flux -= absorption
+
+    plt.figure(figsize=(14, 4*len(balmer_lines)))
+
+    for i, line in enumerate(balmer_lines[:5]):
+        param_key = f"{line}_height"
+
+        A_val = -fits[i].params[param_key].value
+        A_err = fits[i].params[param_key].stderr
 
         wave = stamps[i][0]
         flux = stamps[i][1]
@@ -375,7 +416,7 @@ def balmer_absorption_correction(info):
                                    100)
 
         # Left panel: main fit
-        plt.subplot(len(balmer_lines), 2, 2*i + 1)
+        plt.subplot(len(balmer_lines[:5]), 2, 2*i + 1)
 
         plt.step(wave, flux, label='Data', color='black')
 
@@ -388,10 +429,7 @@ def balmer_absorption_correction(info):
 
         plt.xlabel('Wavelength (Å)')
         plt.ylabel('Flux')
-        param_key = f"{line}_height"
 
-        A_val = -fits[i].params[param_key].value
-        A_err = fits[i].params[param_key].stderr
 
         if A_err is None:
             A_text = f"A: {A_val:.2f} ± N/A"
@@ -426,17 +464,17 @@ def balmer_absorption_correction(info):
         plt.legend()
 
     plt.tight_layout()
-    plt.savefig(f'{proj_DIR}bal_abs/balmer_fits_{class_.gal_id}_.pdf',
-                format='pdf')
+    # plt.savefig(f'{proj_DIR}bal_abs/balmer_fits_{class_.gal_id}_.pdf',
+    #             format='pdf')
     plt.show()
 
-    absorption_beta = neg_gauss(class_, 'H_beta', data[0], emcee[0][0])
-    absorption_alpha = neg_gauss(class_, 'H_alpha', data[0], emcee[0][0])
-    absorption = absorption_alpha + absorption_beta
+    # absorption_beta = neg_gauss_EW(class_, 'H_beta', data[0], emcee[0], EW_med, 0)
+    # absorption_alpha = neg_gauss_EW(class_, 'H_alpha', data[0], emcee[0], EW_med, 0)
+    # absorption = absorption_alpha + absorption_beta
 
-    corrected_flux += absorption
+    # corrected_flux += absorption
 
-    save_corrected_data(class_, data, corrected_flux)
+    # save_corrected_data(class_, data, corrected_flux)
 
     return f'Balmer absorption correction applied and results saved for {class_.gal_id}.'
 

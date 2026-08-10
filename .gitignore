@@ -1,0 +1,14 @@
+# Ignore everything by default
+*
+
+# But allow directories to be traversed (needed for the rules below to reach nested files)
+!*/
+
+# Allow the file types you want to keep
+!*.py
+!*.ipynb
+
+# Optional: keep common project files too
+!README*
+!requirements.txt
+!.gitignore
