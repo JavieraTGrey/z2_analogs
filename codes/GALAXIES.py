@@ -9,6 +9,7 @@ import pandas
 
 DATA_DIR = '/Users/javieratoro/Desktop/thesis/BAADE_DATA/testing/'
 
+
 GALAXIES = {
     'J0020': {
         'DIR': f'{DATA_DIR}10-J0020/',
