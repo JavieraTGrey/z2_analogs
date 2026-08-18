@@ -12,8 +12,8 @@ from GALAXIES import get_galaxy, list_galaxies
 from GaussianFitting import fitSpectrum
 
 proj_DIR = '/Users/javieratoro/Desktop/thesis/proyecto 2024-2/'
-balmer_lines = ['H_gamma', 'H_delta',
-                'H_epsilon', 'H_8', 'H_9', 'H_10', 'H_11', 'H_12']
+balmer_lines = ['H1_4340A', 'H1_4102A',
+                'H1_3970A', 'H1_3889A', 'H1_3835A', 'H1_3798A', 'H1_3771A', 'H1_3750A']
 
 
 # Read data for galaxies
@@ -63,9 +63,9 @@ def first_sigma_est(class_, data, plot=False):
 
 def get_sigma(line, class_, sigmas):
     sigma_narr, sigma_broad = sigmas
-    bright_lines = ['O2_3725', 'O2_3727', 'H_alpha', 'H_beta', 'H_gamma',
-                    'O3_5008', 'O3_4959', 'N2_6550', 'N2_6585', 'S2_6716',
-                    'S2_6730']
+    bright_lines = ['O2_3726A', 'O2_3729A', 'H1_6563A', 'H1_4861A', 'H1_4340A',
+                    'O3_5007A', 'O3_4959A', 'N2_6548A', 'N2_6583A', 'S2_6716A',
+                    'S2_6731A']
     center = class_.linelist_dict[line] * (1 + class_.redshift)
     if line in bright_lines:
         sigma = (center / const.c.to('km/s').value) * sigma_broad.value
@@ -376,8 +376,8 @@ def balmer_absorption_correction(info):
     """
     class_ = SPECTRALDATA(info)
     _ = REDSHIFT(class_)
-    lines = ['H_gamma', 'H_delta', 'H_epsilon', 'H_8', 'H_9',
-             'H_10', 'H_11', 'H_12', 'H_13', 'H_14']
+    lines = ['H1_4340A', 'H1_4102A', 'H1_3970A', 'H1_3889A', 'H1_3835A',
+            'H1_3798A', 'H1_3771A', 'H1_3750A', 'H1_3734A', 'H1_3722A']
     windows = [50, 50, 50, 50, 50, 50, 50, 50, 50, 50]
 
     fits, comps, stamps, emcee = [], [], [], []
@@ -412,9 +412,9 @@ def balmer_absorption_correction(info):
         title_prefix='Before correction'
     )
 
-    absorption_alpha = neg_gauss_EW(class_, 'H_alpha', data[0],
+    absorption_alpha = neg_gauss_EW(class_, 'H1_6563A', data[0],
                                     emcee[0], EW_med, 0)
-    absorption_beta = neg_gauss_EW(class_, 'H_beta', data[0],
+    absorption_beta = neg_gauss_EW(class_, 'H1_4861A', data[0],
                                    emcee[0], EW_med, 0)
     corrected_flux -= (absorption_alpha + absorption_beta)
 
@@ -438,8 +438,8 @@ def balmer_absorption_correction(info):
 # Program
 #
 # =============================================================================
-if __name__ == '__main__':
-    galaxies = list_galaxies()
-    for gal in galaxies:
-        info = get_galaxy(gal)
-        balmer_absorption_correction(info)
+# if __name__ == '__main__':
+#     galaxies = list_galaxies()
+#     for gal in galaxies:
+#         info = get_galaxy(gal)
+#         balmer_absorption_correction(info)
