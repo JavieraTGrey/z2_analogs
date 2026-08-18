@@ -61,22 +61,25 @@ class SPECTRALDATA:
         self.gal_id = self.names[0][:5]
         self.model1IT = None
 
-    em_path = f'{proj_DIR}CSV_files/emission_line1.csv'
+    em_path = f'{proj_DIR}codes/lines_info.csv'
 
     def load_line_list(self, path=em_path):
         """Loads the emission line list from a CSV file."""
         line_list = pd.read_csv(path)
         linelist_table = ascii.read(path)
+        line_list = line_list.rename(columns={'name': 'name',
+                                              'latex_label': 'latex_label',
+                                              'wave_vac': 'vacuum_wave'})
         linelist_dict = {}
         for line in linelist_table:
-            linelist_dict[line['name']] = line['vacuum_wave']
+            linelist_dict[line['name']] = line['wave_vac']
         return line_list, linelist_dict
 
 
 class REDSHIFT:
     '''
     Receives the SPECTRALDATA class and calculates source's redshift according
-    to H_alpha and O[III]5007 emission lines. Updating the new value in the
+    to H1_6563A and O[III]5007 emission lines. Updating the new value in the
     SPECTRALDATA class.
     '''
     def __init__(self, spectra):
@@ -116,7 +119,7 @@ class REDSHIFT:
         """
         w, flux, sigma, name = data
 
-        lines_ = ['O3_5008', 'H_alpha']
+        lines_ = ['O3_5007A', 'H1_6563A']
         list_wave_rest = self.spectra.line_wave_or
         list_wave_obs = self.spectra.lines_waves
 
@@ -135,8 +138,7 @@ class REDSHIFT:
         if zs:  # Ensure zs is not empty before calculating median
             self.spectra.redshift = np.median(zs)
 
-        lines = ['H_beta', "O3_4959", 'O3_5008', 'N2_6550', 'H_alpha',
-                 'N2_6585']
+        lines = ['H1_4861A', "O3_4959A", 'O3_5007A', 'N2_6548A', 'N2_6583A']
 
         # Get gaussian on both lines
         cte = (1 + self.spectra.redshift)
@@ -162,7 +164,7 @@ class REDSHIFT:
             self.comps = []
             # Get manual stamp on the emission lines
             center = self.spectra.linelist_dict[label] * cte
-            sep = 7 if label in ['N2_6550', 'N2_6585'] else 15
+            sep = 7 if label in ['N2_6548A', 'N2_6583A'] else 15
             mask_below = (w > center - sep)
             mask_up = (w < center + sep)
             mask_stamp = mask_below & mask_up
@@ -227,25 +229,25 @@ class REDSHIFT:
                 self.comps.append(out_comp_mult)
                 wave_obs = np.append(wave_obs,
                                      out_comp_mult.params[f'{label}_center'])
-            plt.figure(figsize=(8, 5))
-            plt.errorbar(wave_stamp, stamp, yerr=sigma_stamp, fmt='o',
-                         color='blue', ms=2, alpha=0.5, label="Observed")
+            # plt.figure(figsize=(8, 5))
+            # plt.errorbar(wave_stamp, stamp, yerr=sigma_stamp, fmt='o',
+            #              color='blue', ms=2, alpha=0.5, label="Observed")
 
             # Overplot all MC fits
-            for fit in self.comps:
-                plt.plot(wave_stamp, fit.best_fit,
-                         color="gray", alpha=0.5)
+            # for fit in self.comps:
+            #     plt.plot(wave_stamp, fit.best_fit,
+            #              color="gray", alpha=0.5)
 
-            # Median fit
-            all_fits = np.array([fit.best_fit for fit in self.comps])
-            median_fit = np.median(all_fits, axis=0)
-            plt.plot(wave_stamp, median_fit, color="red", label="Median fit")
+            # # Median fit
+            # all_fits = np.array([fit.best_fit for fit in self.comps])
+            # median_fit = np.median(all_fits, axis=0)
+            # plt.plot(wave_stamp, median_fit, color="red", label="Median fit")
 
-            plt.xlabel(r"Wavelength [$\AA$]")
-            plt.ylabel(r'Flux (erg / s / cm$^{2}$)')
-            plt.title(f"Monte Carlo fits for {label}")
-            plt.legend()
-            plt.show()
+            # plt.xlabel(r"Wavelength [$\AA$]")
+            # plt.ylabel(r'Flux (erg / s / cm$^{2}$)')
+            # plt.title(f"Monte Carlo fits for {label}")
+            # plt.legend()
+            # plt.show()
         self.z_chain = wave_obs / wave_rest - 1
         self.redshifts.append(np.median(self.z_chain))
 
@@ -405,8 +407,8 @@ class REDSHIFT:
 #         self.spectra = spectra
 #         self.gal_id = self.spectra.names[0][:5]
 #         # Set Balmer lines names
-#         self.balmer_lines = ['H_gamma', 'H_delta',
-#                              'H_epsilon', 'H_8', 'H_9', 'H_10', 'H_11', 'H_12',
+#         self.balmer_lines = ['H1_4340A', 'H1_4102A',
+#                              'H1_3970A', 'H_8', 'H_9', 'H_10', 'H_11', 'H_12',
 #                              'H_13', 'H_14']
 
 #         # Read MW dust corrected data if it exist
@@ -479,8 +481,8 @@ class REDSHIFT:
 #         Create stamps for every emission line 25*sigma from center,
 #         masking the emission lines for future modelling.
 #         """
-#         bright_lines = ['O2_3725', 'O2_3727', 'H_alpha', 'H_beta', 'H_gamma',
-#                         'O3_5008', 'O3_4959', 'N2_6550', 'N2_6585', 'S2_6716',
+#         bright_lines = ['O2_3725', 'O2_3727', 'H1_6563A', 'H_beta', 'H1_4340A',
+#                         'O3_5007A', 'O3_4959', 'N2_6550', 'N2_6585', 'S2_6716',
 #                         'S2_6730']
 #         self.masked_flux = self.flux.copy()
 #         self.stamps = []
@@ -714,7 +716,7 @@ class IMAGES:
         - Left: Full spectrum with observed data, model spectra, and
         line markers.
         - TopRight: Zoom on the H_beta line region.
-        - TopRight2: Zoom on the H_gamma line region.
+        - TopRight2: Zoom on the H1_4340A line region.
         - Bottom: Zoom around [Ne III] λ3970 and H11 with line markers.
 
     Parameters
@@ -812,8 +814,8 @@ class IMAGES:
 
         # ========== TOP RIGHT PANELS ==========
         # Panel 1
-        xlim = self.lines_waves[self.line_name == 'H_alpha'].values
-        wave_O3 = self.lines_waves[self.line_name == 'H_alpha'].values
+        xlim = self.lines_waves[self.line_name == 'H1_6563A'].values
+        wave_O3 = self.lines_waves[self.line_name == 'H1_6563A'].values
         resta_O3 = np.abs(wave - wave_O3)
         flux_O3 = flux[np.argmin(resta_O3)]
         axs['TopRight'].set_xlim(xlim-30, xlim+30)
@@ -829,9 +831,9 @@ class IMAGES:
 
         # ========== BOTTOM PANEL ==========
         # Zoom around [Ne III] λ3970 and H11
-        xlim_out = self.lines_waves[self.line_name == 'H_epsilon'].values
+        xlim_out = self.lines_waves[self.line_name == 'H1_3970A'].values
         xlim_in = self.lines_waves[self.line_name == 'H_14'].values
-        wave_hb = self.lines_waves[self.line_name == 'H_epsilon'].values
+        wave_hb = self.lines_waves[self.line_name == 'H1_3970A'].values
         resta_hb = np.abs(wave - wave_hb)
         flux_hb = flux[np.argmin(resta_hb)]
 
@@ -874,9 +876,9 @@ class CONTINUUM_SUBSTRACT:
         self.gal_id = spectra.gal_id
         self.spectra = spectra
         self.plot = plot
-        self.bright_lines = ['O2_3725', 'O2_3727', 'H_alpha', 'H_beta',
-                             'H_gamma', 'O3_5008', 'O3_4959', 'N2_6550',
-                             'N2_6585', 'S2_6716', 'S2_6730']
+        self.bright_lines = ['O2_3725A', 'O2_3727A', 'H1_6563A', 'H1_4861A',
+                             'H1_4340A', 'O3_5007A', 'O3_4959A', 'N2_6548A',
+                             'N2_6583A', 'S2_6716A', 'S2_6731A']
         self.read_data()
         self.cont_est()
         self.save_corrected_data()
