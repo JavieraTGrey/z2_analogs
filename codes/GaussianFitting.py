@@ -60,9 +60,9 @@ def fitSpectrum_ONE(lams, flux, label, flux_error, linelist, z_init=0,
                                               vary=vary, expr=expr,
                                               min=0.0)
 
-        bright_lines = ['O2_3725', 'O2_3727', 'H_alpha', 'H_beta', 'H_gamma',
-                        'O3_5008', 'O3_4959', 'N2_6550', 'N2_6585', 'S2_6716',
-                        'S2_6730']
+        bright_lines = ['O2_3726A', 'O2_3729A', 'H1_6563A', 'H1_4861A',
+                        'H1_4340A', 'O3_5007A', 'O3_4959A', 'N2_6548A',
+                        'N2_6583A', 'S2_6716A', 'S2_6731A']
         if broad is True:
             pars_mult.add(name='sigma_v_broad', value=90, min=70, max=500)
 
@@ -173,9 +173,10 @@ def fitSpectrum(lams, flux, flux_error, linelist, z_init=0,
                                                   vary=vary, expr=expr,
                                                   min=0.0)
 
-        bright_lines = ['O2_3725', 'O2_3727', 'H_alpha', 'H_beta', 'H_gamma',
-                        'O3_5008', 'O3_4959', 'N2_6550', 'N2_6585', 'S2_6716',
-                        'S2_6730']
+        bright_lines = ['O2_3726A', 'O2_3729A', 'H1_6563A', 'H1_4861A',
+                        'H1_4340A', 'O3_5007A', 'O3_4959A', 'N2_6548A',
+                        'N2_6583A', 'S2_6716A', 'S2_6731A']
+
         if broad is True:
             pars_mult.add(name='sigma_v_broad', value=90, min=70, max=500)
 
@@ -315,9 +316,9 @@ def fitSpectrumMC(lams, flux, scaled_flux_error, linelist, z_init=0.1,
     columns = ['iter', 'n_eval', 'success', 'message', 'ier', 'z',
                'sigma_v_narrow', 'sigma_v_broad']
 
-    bright_lines = ['O2_3725', 'O2_3727', 'H_alpha', 'H_beta',
-                    'H_gamma', 'O3_5008', 'O3_4959', 'N2_6550',
-                    'N2_6585', 'S2_6716', 'S2_6730']
+    bright_lines = ['O2_3726A', 'O2_3729A', 'H1_6563A', 'H1_4861A',
+                    'H1_4340A', 'O3_5007A', 'O3_4959A', 'N2_6548A',
+                    'N2_6583A', 'S2_6716A', 'S2_6731A']
 
     for label in linelist:
         columns.append(str(label) + '_narrow')
