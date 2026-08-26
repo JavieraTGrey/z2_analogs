@@ -240,10 +240,10 @@ def mc_sigma_and_ratio(red, stamp, linelist, n_mc=100, rng=None):
     }
 
 
-def run_bright(red):
-    bright_lines = ['H1_6563A', 'H1_4861A', 'O3_4959A', 'O3_5007A']
+def run_bright(red, bright_lines):
     stamps = get_stamps(red)
     samples = []
+
     for line, stamp in zip(bright_lines, stamps):
         if line == 'O3_5007A':
             sample = mc_sigma_and_ratio(red, stamp, [line, 'He1_5016A'])
@@ -255,7 +255,7 @@ def run_bright(red):
 
 def get_ratios(red):
     samples = run_bright(red)
-    narrow_samples = [s['sigma_narrow_sampl'] for s in samples]
+    narrow_samples = [s['sigma_narrow_samples'] for s in samples]
     broad_samples = [s['sigma_broad_samples'] for s in samples]
     ratios_samples = [s['ratio_samples'] for s in samples]
 
@@ -266,44 +266,47 @@ def get_ratios(red):
     return sigma_narrow, sigma_broad, ratio
 
 
-def plot_sigma_histograms(samples, bins=40, figsize=(12, 4)):
+def plot_sigma_histograms(samples, lines, bins=(10, 10), figsize=(12, 4)):
 
-    narrow_samples = np.concatenate([s['sigma_narrow_sampl'] for s in samples])
-    broad_samples = np.concatenate([s['sigma_broad_samples'] for s in samples])
-    ratio_samples = np.concatenate([s['ratio_samples'] for s in samples])
+    narrow_samples = [s['sigma_narrow_samples'] for s in samples]
+    broad_samples = [s['sigma_broad_samples'] for s in samples]
+    ratio_samples = [s['ratio_samples'] for s in samples]
 
     fig, axes = plt.subplots(1, 3, figsize=figsize)
 
     panels = [
         (narrow_samples, r'$\sigma_{narrow}$', axes[0]),
         (broad_samples,  r'$\sigma_{broad}$',  axes[1]),
-        (ratio_samples,  r'$\sigma_{broad}/\sigma_{narrow}$', axes[2]),
+        (ratio_samples,  r'$\A_{broad}/\sigma_{narrow}$', axes[2]),
     ]
 
-    for data, label, ax in panels:
-        median_val = np.median(data)
+    for datas, label, ax in panels:
+        str = ''
+        for data, line, bin in zip(datas, lines, bins):
 
-        ax.hist(data, bins=bins, color='steelblue', alpha=0.7, edgecolor='k')
-        ax.axvline(median_val, color='crimson', linestyle='--', linewidth=2)
+            median_val = np.median(data)
 
-        ax.text(
-            0.97, 0.95,
-            f'median = {median_val:.3f}',
-            transform=ax.transAxes,
-            ha='right', va='top',
-            fontsize=11,
-            bbox={'boxstyle': 'round', 'facecolor': 'white', 'alpha': 0.8}
-        )
+            ax.hist(data, bins=bin, alpha=0.5, edgecolor='k')
+
+            ax.axvline(
+
+                median_val,
+
+                color='crimson',
+
+                linestyle='--',
+
+                linewidth=2
+
+            )
+            str += f'{line}, median = {median_val:.3f}\n'
 
         ax.set_xlabel(label)
         ax.set_ylabel('Counts')
-
+        ax.set_title(str)
     plt.tight_layout()
     plt.show()
     return fig
-
-# Usage:
-# fig = plot_sigma_histograms(samples)
 
 
 def mc_flux_errors(red, stamp, linelist, sigma_v_narrow, sigma_v_broad,
