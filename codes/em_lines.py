@@ -171,7 +171,7 @@ def model_bright_lines(red, stamp, linelist,
         pars.add('sigma_v_narrow', value=sigma_v_narrow, vary=False)
 
     if sigma_v_broad is None:
-        pars.add('sigma_v_broad', value=80, min=65, max=500, vary=True)
+        pars.add('sigma_v_broad', value=80, min=65, max=100, vary=True)
     else:
         pars.add('sigma_v_broad', value=sigma_v_broad, vary=False)
 
