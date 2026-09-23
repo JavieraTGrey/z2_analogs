@@ -8,6 +8,8 @@ from lmfit.models import GaussianModel, PolynomialModel
 import os
 import pandas as pd
 from GaussianFitting import fitSpectrum
+from dust_correction import E_BV_, get_flux, f_int
+
 # from scipy.stats import gaussian_kde
 # from scipy.signal import find_peaks
 
@@ -318,12 +320,14 @@ def get_EW_from_mc(class_, label, As, vel=550):
 
 # Model all lines from a list and correct data
 def model_from_list_lines(class_, data, sigmas,
-                          lines, vel=550, n_mc=1000):
+                          lines, vel=550, n_mc=1000, min_amp_sigma=3.0):
 
     fits, fits_eval_stamp, stamps, params = {}, {}, {}, {}
     corrected_flux = data[1].copy()
-    corr_stamps, EW_lines, EW_hb_samples = {}, {}, []
+    corr_stamps, EW_lines, EW_hb_samples, EW_hb_weights = {}, {}, [], []
+    line_significance = {}
     corrected_all_flux = []
+
     for line in lines:
         masked_data = mask_nonuse_emission_line(
             class_, sigmas, line, [data[0], corrected_flux, data[2]])
@@ -333,6 +337,7 @@ def model_from_list_lines(class_, data, sigmas,
 
         fit_mc, comps, param = model_mc_abs(class_, line, isolated_data,
                                             sigmas, vel=vel, n_mc=n_mc)
+        param = np.asarray(param)
         params[line] = param
         fits[line] = fit_mc
         fits_eval_stamp[line] = comps
@@ -342,7 +347,7 @@ def model_from_list_lines(class_, data, sigmas,
         corrected_flux -= absorption
 
         corr_stamps[line] = [isolated_data[0],
-                             isolated_data[1]-comps[0][f'{line}_'],
+                             isolated_data[1] - comps[0][f'{line}_'],
                              isolated_data[2]]
 
         if line == 'H1_3970A':
@@ -354,8 +359,36 @@ def model_from_list_lines(class_, data, sigmas,
         EW_hb_line = EW_line / EW_all_ratios[line]
         EW_hb_samples.append(EW_hb_line)
 
-    EW_hb_stack = np.array(EW_hb_samples)
-    EW_hb_der_mc = np.mean(EW_hb_stack, axis=0)
+        # --- per-draw weight (amplitude vs local continuum noise) ---
+        amplitude = param[:, 0]
+        noise_level = np.median(isolated_data[2])
+        significance = np.abs(amplitude) / noise_level
+        weight_draw = np.clip(significance / min_amp_sigma, 0, 1)
+        weight_draw = np.where(amplitude > 0, weight_draw, 0.0)
+
+        # --- NEW: line-level weight (is the fit consistent with zero overall?) ---
+        mean_amplitude = np.mean(amplitude)
+        amplitude_std = np.std(amplitude)
+        amplitude_std_safe = amplitude_std if amplitude_std > 0 else np.inf
+        sig_line = np.abs(mean_amplitude) / amplitude_std_safe
+        line_significance[line] = sig_line
+        weight_line_level = np.clip(sig_line / min_amp_sigma, 0, 1)
+
+        # combine: a line that's not significant overall gets down-weighted
+        # across ALL its draws, on top of any per-draw discounting
+        weight_line = weight_draw * weight_line_level
+        EW_hb_weights.append(weight_line)
+
+    EW_hb_stack = np.array(EW_hb_samples)          # shape (n_lines, n_mc)
+    EW_hb_weight_stack = np.array(EW_hb_weights)   # shape (n_lines, n_mc)
+
+    weight_sum = np.sum(EW_hb_weight_stack, axis=0)
+    weight_sum_safe = np.where(weight_sum == 0, 1, weight_sum)
+    EW_hb_der_mc = np.sum(EW_hb_stack * EW_hb_weight_stack, axis=0) / weight_sum_safe
+    EW_hb_der_mc = np.where(weight_sum == 0,
+                            np.mean(EW_hb_stack, axis=0),
+                            EW_hb_der_mc)
+
     EW_hb_der = np.mean(EW_hb_der_mc)
     EW_hb_der_err = np.std(EW_hb_der_mc)
 
@@ -372,7 +405,7 @@ def model_from_list_lines(class_, data, sigmas,
         params[line] = param
         absorption_mc = np.zeros((n_mc, len(data[0])))
         for i in range(n_mc):
-            EW_single = EW_hb_der_mc[i]*EW_all_ratios[line]
+            EW_single = EW_hb_der_mc[i] * EW_all_ratios[line]
             absorption_mc[i] = neg_gauss_EW_single(class_, line, data[0],
                                                    param[i],
                                                    EW_single,
@@ -395,12 +428,12 @@ def model_from_list_lines(class_, data, sigmas,
                                                           absorption_mean),
                              corrected_sigma_small]
 
-    corrected_all_flux.append([data[0], corrected_all_flux,
-                               corrected_sigma_full])
+        corrected_all_flux.append([data[0], corrected_flux,
+                                   corrected_sigma_full])
 
     return (fits, fits_eval_stamp, stamps, params, corr_stamps, EW_lines,
             EW_hb_samples, corrected_all_flux, EW_hb_der, EW_hb_der_err,
-            EW_hb_stack, EW_hb_der_mc)
+            EW_hb_stack, EW_hb_der_mc, EW_hb_weight_stack, line_significance)
 
 
 # Model flux for lines in list
@@ -814,19 +847,71 @@ def plot_corr_flux(data, corrected_all_flux, line,
 
 
 # Model how this affects the Hb line
-def model_hb_effect(class_, data, EW_hb_stack, params, vel=550):
+def model_hb_effect(class_, data, sigmas, EW_hb_stack, params, vel=550):
     line = 'H1_4861A'
     param = params[line]
-    EW_hb_stack = EW_hb_stack.flatten()
-    corrected_flux = np.zeros((EW_hb_stack, len(data[1])))
+    n_param, group_size = EW_hb_stack.shape
 
-    for i in range(EW_hb_stack):
+    lines_to_fit = ['H1_6563A', 'H1_4861A', 'O3_5007A',
+                    'N2_6548A', 'N2_6583A']
 
-        absorption = neg_gauss_EW_single(class_, line, data[0],
-                                         param, EW_hb_stack[i],
-                                         vel=vel)
-        corrected_flux[i] = data[1]-absorption
-    return corrected_flux
+    corrected_flux = np.zeros((n_param * group_size, len(data[1])))
+    fits, amplitudes = [], []
+    idx = 0
+    for p in range(n_param):
+        for j in range(group_size):
+            absorption = neg_gauss_EW_single(class_, line, data[0],
+                                             param[p], EW_hb_stack[p, j],
+                                             vel=vel)
+            corrected_flux[idx] = data[1] - absorption
+
+            fit = model_flux_list(class_, (data[0], corrected_flux[idx],
+                                           data[2]),
+                                  lines_to_fit, sigmas)
+            fits.append(fit)
+
+            A_broad = fit.params[f'{line}_broad_amplitude'].value
+            A_narrow = fit.params[f'{line}_narrow_amplitude'].value
+            amplitude = A_broad + A_narrow
+            amplitudes.append(amplitude)
+            print(idx)
+            idx += 1
+
+    df = pd.DataFrame({'corr_flux': list(corrected_flux),
+                       'fits': fits,
+                       'amplitudes': amplitudes})
+    df.to_csv(f'{proj_DIR}images_try/EW_fluxes_{class_.names[0][:-5]}.csv')
+    return df
+
+
+def dust_correction():
+    names = ['J0023', 'J0136', 'J0020', 'J0203', 'J0243', 'J0333',
+             'J0404', 'J2204', 'J2258', 'J2336', 'J0328']
+
+    columns_ = ['ID', 'mass', 'z_red', 'z_blue']
+    for line in lines['name']:
+        columns_.append(line + '_flux')
+        columns_.append(line + '_fluxerr')
+
+    df = pd.DataFrame(columns=columns_)
+
+    for name in names:
+        data = pd.read_csv(DIR + f'lines/{name}/{name}_model_parts.csv')
+        all_rows = {'ID': data['ID'][0], 'mass': data['mass'][0],
+                    'z_red': data['z_red'][0], "z_blue": data['z_blue'][0]}
+        for line in lines['name']:
+            print(f'Correcting line {line}')
+            wl = lines[lines['name'] == line]['vacuum_wave'].values
+            E_BV, _ = E_BV_(name)
+            flux, fluxerr = get_flux(name, line)
+            f_corr = f_int(wl, flux, E_BV)
+            f_corr_err = f_int(wl, fluxerr, E_BV)
+            all_rows[line + '_flux'] = f_corr[0]
+            all_rows[line + '_fluxerr'] = f_corr_err[0]
+
+        df.loc[-1] = all_rows
+        df.index = df.index + 1
+    # df.to_csv(DIR + 'lines/magE2024_master_Dcorr_parts.csv')
 
 
 # def peaks_estimation(class_, fit_estimation,
