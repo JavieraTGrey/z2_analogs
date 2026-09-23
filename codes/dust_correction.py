@@ -135,7 +135,8 @@ def E_BV_(name):
                       }
 
     decrement_dict_pd = pd.DataFrame(data=decrement_dict, index=[0])
-    save_catalog(name, decrement_dict_pd, DIR + '/results/bal_decrements_parts.csv')
+    path = '/results/bal_decrements_parts.csv'
+    save_catalog(name, decrement_dict_pd, DIR + path)
     return E_BV, E_BV_ERR
 
 
@@ -192,4 +193,5 @@ def save_fluxes():
     df.to_csv(DIR + 'lines/magE2024_master_Dcorr_parts.csv')
 
 
-save_fluxes()
+if __name__ == '__main__':
+    save_fluxes()
