@@ -758,7 +758,9 @@ def plot_all_fits(class_, balmer_lines, stamps, params,
     return fig
 
 
-def plot_ew_histograms(class_, EW_hb_samples, lines=None,  save_path=None):
+def plot_ew_histograms(class_, EW_hb_samples, weights=None, lines=None,
+                        line_significance=None, used_threshold=0.5,
+                        save_path=None):
     if lines is None:
         lines = ['H1_4340A', 'H1_4102A', 'H1_3889A', 'H1_3835A',
                  'H1_3798A', 'H1_3771A']
@@ -767,22 +769,53 @@ def plot_ew_histograms(class_, EW_hb_samples, lines=None,  save_path=None):
     ncols = 3
     nrows = int(np.ceil(n_lines / ncols))
 
+    # ---- Histograms: used vs discarded samples, colored separately ----
     fig, axs = plt.subplots(nrows, ncols, squeeze=False,
-                            figsize=(4*ncols, 3*nrows))
+                             figsize=(4*ncols, 3*nrows))
     axs_flat = axs.flatten()
+
+    n_used_list, n_discarded_list = [], []
+    all_used_EW = []   # NEW: collect used EW across all lines for fig5
 
     for i, line in enumerate(lines):
         EW_hb = EW_hb_samples[i]
         ax = axs_flat[i]
-        ax.hist(EW_hb, bins=30, alpha=0.8)
-        ax.axvline(np.mean(EW_hb), color='red', linestyle='--',
-                   label=f'mean={np.mean(EW_hb):.2f}')
-        ax.set_title(line)
+
+        if weights is not None:
+            w = weights[i]
+            used_mask = w >= used_threshold
+            n_used = np.sum(used_mask)
+            n_discarded = np.sum(~used_mask)
+            n_used_list.append(n_used)
+            n_discarded_list.append(n_discarded)
+
+            if n_used > 0:
+                ax.hist(EW_hb[used_mask], bins=30, alpha=0.7, color='tab:blue',
+                        label=f'used (n={n_used})')
+                all_used_EW.append(EW_hb[used_mask])
+            if n_discarded > 0:
+                ax.hist(EW_hb[~used_mask], bins=30, alpha=0.7, color='tab:red',
+                        label=f'discarded (n={n_discarded})')
+
+            if n_used > 0:
+                mean_used = np.mean(EW_hb[used_mask])
+                ax.axvline(mean_used, color='black', linestyle='--',
+                           label=f'mean (used)={mean_used:.2f}')
+        else:
+            ax.hist(EW_hb, bins=30, alpha=0.8)
+            ax.axvline(np.mean(EW_hb), color='red', linestyle='--',
+                       label=f'mean={np.mean(EW_hb):.2f}')
+
+        # --- NEW: show line-level significance in the title ---
+        title = line
+        if line_significance is not None and line in line_significance:
+            title += f'  (sig={line_significance[line]:.2f}σ)'
+        ax.set_title(title, fontsize=10)
+
         ax.set_xlabel(r'EW ($H_\beta$)')
         ax.set_ylabel('Count')
-        ax.legend(fontsize=8)
+        ax.legend(fontsize=7)
 
-    # hide unused subplots
     for k in range(n_lines, len(axs_flat)):
         axs_flat[k].axis('off')
 
@@ -792,31 +825,137 @@ def plot_ew_histograms(class_, EW_hb_samples, lines=None,  save_path=None):
         plt.savefig(path, format='png')
     plt.show()
 
-    fig2, axs2 = plt.subplots(1, 2, figsize=(6, 4))
+    # ---- EW vs weight scatter, colored by used/discarded ----
+    fig3 = None
+    if weights is not None:
+        fig3, axs3 = plt.subplots(nrows, ncols, squeeze=False,
+                                   figsize=(4*ncols, 3*nrows))
+        axs3_flat = axs3.flatten()
+
+        for i, line in enumerate(lines):
+            ax = axs3_flat[i]
+            w = weights[i]
+            used_mask = w >= used_threshold
+            ax.scatter(EW_hb_samples[i][used_mask], w[used_mask],
+                      s=5, alpha=0.5, color='tab:blue', label='used')
+            ax.scatter(EW_hb_samples[i][~used_mask], w[~used_mask],
+                      s=5, alpha=0.5, color='tab:red', label='discarded')
+            ax.axhline(used_threshold, color='green', linestyle=':',
+                      alpha=0.7, label=f'threshold={used_threshold}')
+
+            title = line
+            if line_significance is not None and line in line_significance:
+                title += f'  (sig={line_significance[line]:.2f}σ)'
+            ax.set_title(title, fontsize=10)
+
+            ax.set_xlabel(r'EW ($H_\beta$)')
+            ax.set_ylabel('Weight')
+            ax.set_ylim(-0.05, 1.05)
+            ax.legend(fontsize=7)
+
+        for k in range(n_lines, len(axs3_flat)):
+            axs3_flat[k].axis('off')
+
+        plt.tight_layout()
+        if save_path is not None:
+            path = f'{save_path}/ew_weight_scatter_{class_.names[0][:-5]}.png'
+            plt.savefig(path, format='png')
+        plt.show()
+
+    # ---- Summary bar chart: how many used vs discarded per line ----
+    fig4 = None
+    if weights is not None:
+        fig4, ax4 = plt.subplots(figsize=(1.2*n_lines + 2, 4))
+        x = np.arange(n_lines)
+        ax4.bar(x, n_used_list, label='used', color='tab:blue')
+        ax4.bar(x, n_discarded_list, bottom=n_used_list,
+               label='discarded', color='tab:red')
+
+        xtick_labels = lines
+        if line_significance is not None:
+            xtick_labels = [f'{l}\n({line_significance.get(l, np.nan):.2f}σ)'
+                            for l in lines]
+        ax4.set_xticks(x)
+        ax4.set_xticklabels(xtick_labels, rotation=45, ha='right')
+        ax4.set_ylabel('Number of MC samples')
+        ax4.set_title(f'Used vs discarded samples (threshold={used_threshold})')
+        ax4.legend()
+        plt.tight_layout()
+        if save_path is not None:
+            path = f'{save_path}/ew_used_discarded_summary_{class_.names[0][:-5]}.png'
+            plt.savefig(path, format='png')
+        plt.show()
+
+    # ---- Combined comparison (all samples, used vs discarded) ----
+    fig2, axs2 = plt.subplots(1, 2, figsize=(10, 4))
     all_EW_hb = np.concatenate(EW_hb_samples)
-    axs2[0].hist(all_EW_hb, bins=30, alpha=0.8)
-    axs2[0].axvline(np.mean(all_EW_hb), color='red', linestyle='--',
-                    label=f'mean={np.mean(all_EW_hb):.2f}')
+    axs2[0].hist(all_EW_hb, bins=30, alpha=0.6, color='gray', label='all')
+
+    if weights is not None:
+        all_weights = np.concatenate(weights)
+        used_mask_all = all_weights >= used_threshold
+        n_used_all = np.sum(used_mask_all)
+        n_discarded_all = np.sum(~used_mask_all)
+
+        if n_used_all > 0:
+            axs2[0].hist(all_EW_hb[used_mask_all], bins=30, alpha=0.6,
+                        color='tab:blue', label=f'used (n={n_used_all})')
+        if n_discarded_all > 0:
+            axs2[0].hist(all_EW_hb[~used_mask_all], bins=30, alpha=0.6,
+                        color='tab:red', label=f'discarded (n={n_discarded_all})')
+
+        if n_used_all > 0:
+            mean_used_all = np.mean(all_EW_hb[used_mask_all])
+            axs2[0].axvline(mean_used_all, color='black', linestyle='--',
+                            label=f'mean (used)={mean_used_all:.2f}')
+        else:
+            mean_all = np.mean(all_EW_hb)
+            axs2[0].axvline(mean_all, color='black', linestyle='--',
+                            label=f'mean (all, no used)={mean_all:.2f}')
+    else:
+        axs2[0].axvline(np.mean(all_EW_hb), color='red', linestyle='--',
+                        label=f'mean={np.mean(all_EW_hb):.2f}')
+
     axs2[0].set_title('All Balmer lines combined')
     axs2[0].set_xlabel(r'EW ($H_\beta$)')
     axs2[0].set_ylabel('Count')
     axs2[0].legend(fontsize=8)
 
     for i, line in enumerate(lines):
-        axs2[1].hist(EW_hb_samples[i], bins=15, alpha=0.5,
-                     label=line)
+        axs2[1].hist(EW_hb_samples[i], bins=15, alpha=0.5, label=line)
     axs2[1].set_title('Individual Balmer lines')
     axs2[1].set_xlabel(r'EW ($H_\beta$)')
     axs2[1].set_ylabel('Count')
     axs2[1].legend(fontsize=8)
+
     plt.tight_layout()
     if save_path is not None:
         path = f'{save_path}/ew_all_histograms_{class_.names[0][:-5]}.png'
         plt.savefig(path, format='png')
     plt.show()
-    plt.show()
 
-    return fig, fig2
+    # ---- NEW fig5: combined histogram using ONLY used EW ----
+    fig5 = None
+    if weights is not None and len(all_used_EW) > 0:
+        all_used_EW_concat = np.concatenate(all_used_EW)
+        fig5, ax5 = plt.subplots(figsize=(6, 4))
+        ax5.hist(all_used_EW_concat, bins=30, alpha=0.8, color='tab:blue',
+                label=f'used only (n={len(all_used_EW_concat)})')
+        mean_used_only = np.mean(all_used_EW_concat)
+        std_used_only = np.std(all_used_EW_concat)
+        ax5.axvline(mean_used_only, color='black', linestyle='--',
+                   label=f'mean={mean_used_only:.2f} ± {std_used_only:.2f}')
+        ax5.set_title('All Balmer lines combined (used samples only)')
+        ax5.set_xlabel(r'EW ($H_\beta$)')
+        ax5.set_ylabel('Count')
+        ax5.legend(fontsize=8)
+        plt.tight_layout()
+        if save_path is not None:
+            path = f'{save_path}/ew_used_only_combined_{class_.names[0][:-5]}.png'
+            plt.savefig(path, format='png')
+        plt.show()
+
+    return fig, fig2, fig3, fig4, fig5
 
 
 def plot_corr_flux(data, corrected_all_flux, line,
