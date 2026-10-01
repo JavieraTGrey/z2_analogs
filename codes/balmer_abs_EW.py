@@ -1,5 +1,10 @@
 # Equivalent width calculation and plotting functions
 
+
+# ================================================================
+# IMPORTS & CONFIG
+# ================================================================
+
 import astropy.constants as const
 import numpy as np
 import matplotlib.pyplot as plt
@@ -7,12 +12,9 @@ from lmfit import Parameter
 from lmfit.models import GaussianModel, PolynomialModel
 import os
 import pandas as pd
+import h5py
 from GaussianFitting import fitSpectrum
 from dust_correction import E_BV_, get_flux, f_int
-
-# from scipy.stats import gaussian_kde
-# from scipy.signal import find_peaks
-
 
 proj_DIR = '/Users/javieratoro/Desktop/thesis/proyecto 2024-2/'
 EW_all_ratios = {
@@ -27,9 +29,9 @@ EW_all_ratios = {
     'H1_3750A': 0.750}
 
 
-# --------------------------------------------------------
-# Auxiliar functions
-# --------------------------------------------------------
+# ================================================================
+# Absorption profile models
+# ================================================================
 def neg_gauss(class_, line, w, A):
     w_center = class_.linelist_dict[line]
     z = class_.redshift
@@ -40,21 +42,6 @@ def neg_gauss(class_, line, w, A):
 
 def absorption_func(class_, line, w, A, m, n):
     return neg_gauss(class_, line, w, A) + m * w + n
-
-
-def neg_gauss_EW(class_, line, w, As, EW_, vel=550):
-    w_center = class_.linelist_dict[line]
-    z = class_.redshift
-    mu = w_center * (1 + z)
-    sigma = w_center * (1 + z) * vel / 3e5
-
-    _, m, n = np.mean(As, axis=0)
-
-    continuum_at_mu = m * mu + n
-    A = (EW_ * (1 + z)
-         * continuum_at_mu
-         / (np.sqrt(2 * np.pi) * sigma))
-    return -A * np.exp(-((mu - w) ** 2) / (2 * sigma**2))
 
 
 def neg_gauss_EW_single(class_, line, w, A_triplet, EW_, vel=550):
@@ -68,33 +55,9 @@ def neg_gauss_EW_single(class_, line, w, A_triplet, EW_, vel=550):
     return -A * np.exp(-((mu - w) ** 2) / (2 * sigma**2))
 
 
-def get_stamps(class_, data, lines):
-    wave, flux, err = data[0], data[1], data[2]
-    lines_df = class_.line_list
-    cte = (1 + class_.redshift)
-    stamps = []
-    for bright_line in lines:
-        stamp = flux.copy()
-        for line_label in lines:
-            if bright_line == line_label:
-                continue
-            if line_label == 'He1_5016A':
-                continue
-            info = lines_df[lines_df['name'] == line_label]
-            w3, w4 = info[['w3', 'w4']].values[0]
-
-            mask_line = (wave > w3*cte) & (wave < w4*cte)
-            stamp[mask_line] = np.nan
-        info_bright = lines_df[lines_df['name'] == bright_line]
-        w1, w6 = info_bright[['w1', 'w6']].values[0]
-        mask_stamp = (wave > w1*cte) & (wave < w6*cte)
-        stamps.append((wave[mask_stamp], stamp[mask_stamp], err[mask_stamp]))
-    return stamps
-
-# --------------------------------------------------------
-# Working functions
-# --------------------------------------------------------
-
+# ================================================================
+# Data preparation
+# ================================================================
 
 # Read data for galaxies
 def read_data(class_):
@@ -138,6 +101,30 @@ def first_sigma_est(class_, data, plot=False):
     sigma_broad = fit.params['sigma_v_broad']
 
     return sigma_narrow, sigma_broad
+
+
+def get_stamps(class_, data, lines):
+    wave, flux, err = data[0], data[1], data[2]
+    lines_df = class_.line_list
+    cte = (1 + class_.redshift)
+    stamps = []
+    for bright_line in lines:
+        stamp = flux.copy()
+        for line_label in lines:
+            if bright_line == line_label:
+                continue
+            if line_label == 'He1_5016A':
+                continue
+            info = lines_df[lines_df['name'] == line_label]
+            w3, w4 = info[['w3', 'w4']].values[0]
+
+            mask_line = (wave > w3*cte) & (wave < w4*cte)
+            stamp[mask_line] = np.nan
+        info_bright = lines_df[lines_df['name'] == bright_line]
+        w1, w6 = info_bright[['w1', 'w6']].values[0]
+        mask_stamp = (wave > w1*cte) & (wave < w6*cte)
+        stamps.append((wave[mask_stamp], stamp[mask_stamp], err[mask_stamp]))
+    return stamps, mask_stamp
 
 
 # Get sigma for either narrow or borad component
@@ -213,6 +200,10 @@ def isolate_emission_line(class_, line, datas):
     return wave[mask], flux[mask], sigma[mask]
 
 
+# --------------------------------------------------------
+#  FITTING — single fits and Monte Carlo
+# --------------------------------------------------------
+
 # Model single absorption feature
 def model_single_abs(class_, label, datas, sigmas, vel=550):
     wave, flux_, err = datas
@@ -244,7 +235,7 @@ def model_single_abs(class_, label, datas, sigmas, vel=550):
             value, vary_, min_, max_ = lam, False, None, None
             expr = f'{lam:6.2f}*(1+z)'
         elif param == 'amplitude':
-            value, vary_, min_, max_ = -80, True, -100, 0
+            value, vary_, min_, max_ = -50, True, -100, 0
             expr = None
         else:  # sigma
             value, vary_, min_, max_ = None, False, None, None
@@ -274,166 +265,11 @@ def model_mc_abs(class_, label, isolated_data, sigmas, vel=550, n_mc=100):
         fit_mc.append(fit)
         comps.append(fit.eval_components(x=wave))
         param_key = f"{label}_height"
-        height = -1*fit.params[param_key].value
+        height = -1 * fit.params[param_key].value
         m = fit.params['c1'].value
         n = fit.params['c0'].value
         As.append((height, m, n))
     return fit_mc, comps, As
-
-
-# Save corrected data
-def save_corrected_data(class_, data, new_flux):
-    """
-    Saves the corrected data to a CSV file, creating the directory if
-    needed.
-    """
-    save_dir = f'{proj_DIR}bal_abs'
-    save_path = f'{save_dir}/bcorr_{class_.gal_id}_new.csv'
-
-    os.makedirs(save_dir, exist_ok=True)
-
-    df = pd.DataFrame({'wave': data[0], 'flux': new_flux,
-                       'sigma': data[2]})
-    df.to_csv(save_path, index=False)
-
-    print(f'Saved Balmer Absorption corrected data to: {save_path}')
-
-
-# Get EW from the MC params for a single H line
-def get_EW_from_mc(class_, label, As, vel=550):
-
-    w_center = class_.linelist_dict[label]
-    z = class_.redshift
-    mu = w_center * (1 + z)
-    sigma = w_center * (1 + z) * vel / 3e5
-
-    As = np.array(As)
-    height, m, n = As[:, 0], As[:, 1], As[:, 2]
-
-    continuum_at_mu = m * mu + n
-    EW = (height * np.sqrt(2 * np.pi * sigma**2)
-          / continuum_at_mu
-          / (1 + z))
-
-    return EW
-
-
-# Model all lines from a list and correct data
-def model_from_list_lines(class_, data, sigmas,
-                          lines, vel=550, n_mc=1000, min_amp_sigma=3.0):
-
-    fits, fits_eval_stamp, stamps, params = {}, {}, {}, {}
-    corrected_flux = data[1].copy()
-    corr_stamps, EW_lines, EW_hb_samples, EW_hb_weights = {}, {}, [], []
-    line_significance = {}
-    corrected_all_flux = []
-
-    for line in lines:
-        masked_data = mask_nonuse_emission_line(
-            class_, sigmas, line, [data[0], corrected_flux, data[2]])
-        isolated_data = isolate_emission_line(
-            class_, line, datas=masked_data)
-        stamps[line] = isolated_data
-
-        fit_mc, comps, param = model_mc_abs(class_, line, isolated_data,
-                                            sigmas, vel=vel, n_mc=n_mc)
-        param = np.asarray(param)
-        params[line] = param
-        fits[line] = fit_mc
-        fits_eval_stamp[line] = comps
-
-        absorption = neg_gauss(class_, line, data[0],
-                               np.mean(param, axis=0)[0])
-        corrected_flux -= absorption
-
-        corr_stamps[line] = [isolated_data[0],
-                             isolated_data[1] - comps[0][f'{line}_'],
-                             isolated_data[2]]
-
-        if line == 'H1_3970A':
-            continue  # Skip H1_3970A for EW_hb_samples calculation
-
-        EW_line = get_EW_from_mc(class_, line, param, vel=vel)
-        EW_lines[line] = EW_line
-
-        EW_hb_line = EW_line / EW_all_ratios[line]
-        EW_hb_samples.append(EW_hb_line)
-
-        # --- per-draw weight (amplitude vs local continuum noise) ---
-        amplitude = param[:, 0]
-        noise_level = np.median(isolated_data[2])
-        significance = np.abs(amplitude) / noise_level
-        weight_draw = np.clip(significance / min_amp_sigma, 0, 1)
-        weight_draw = np.where(amplitude > 0, weight_draw, 0.0)
-
-        # --- NEW: line-level weight (is the fit consistent with zero overall?) ---
-        mean_amplitude = np.mean(amplitude)
-        amplitude_std = np.std(amplitude)
-        amplitude_std_safe = amplitude_std if amplitude_std > 0 else np.inf
-        sig_line = np.abs(mean_amplitude) / amplitude_std_safe
-        line_significance[line] = sig_line
-        weight_line_level = np.clip(sig_line / min_amp_sigma, 0, 1)
-
-        # combine: a line that's not significant overall gets down-weighted
-        # across ALL its draws, on top of any per-draw discounting
-        weight_line = weight_draw * weight_line_level
-        EW_hb_weights.append(weight_line)
-
-    EW_hb_stack = np.array(EW_hb_samples)          # shape (n_lines, n_mc)
-    EW_hb_weight_stack = np.array(EW_hb_weights)   # shape (n_lines, n_mc)
-
-    weight_sum = np.sum(EW_hb_weight_stack, axis=0)
-    weight_sum_safe = np.where(weight_sum == 0, 1, weight_sum)
-    EW_hb_der_mc = np.sum(EW_hb_stack * EW_hb_weight_stack, axis=0) / weight_sum_safe
-    EW_hb_der_mc = np.where(weight_sum == 0,
-                            np.mean(EW_hb_stack, axis=0),
-                            EW_hb_der_mc)
-
-    EW_hb_der = np.mean(EW_hb_der_mc)
-    EW_hb_der_err = np.std(EW_hb_der_mc)
-
-    line_der = ['H1_6563A', 'H1_4861A']
-    for line in line_der:
-        masked_data = mask_nonuse_emission_line(
-            class_, sigmas, line, [data[0], corrected_flux, data[2]])
-        isolated_data = isolate_emission_line(
-            class_, line, datas=masked_data)
-        stamps[line] = isolated_data
-
-        fit_mc, comps, param = model_mc_abs(class_, line, isolated_data,
-                                            sigmas, vel=vel, n_mc=n_mc)
-        params[line] = param
-        absorption_mc = np.zeros((n_mc, len(data[0])))
-        for i in range(n_mc):
-            EW_single = EW_hb_der_mc[i] * EW_all_ratios[line]
-            absorption_mc[i] = neg_gauss_EW_single(class_, line, data[0],
-                                                   param[i],
-                                                   EW_single,
-                                                   vel=vel)
-
-        absorption_mean = np.mean(absorption_mc, axis=0)
-        absorption_std = np.std(absorption_mc, axis=0)
-
-        corrected_flux -= absorption_mean
-        corrected_sigma_full = np.sqrt(data[2]**2 + absorption_std**2)
-
-        absorption_std_small = np.interp(isolated_data[0], data[0],
-                                         absorption_std)
-        corrected_sigma_small = np.sqrt(isolated_data[2]**2 +
-                                        absorption_std_small**2)
-
-        corr_stamps[line] = [isolated_data[0],
-                             isolated_data[1] - np.interp(isolated_data[0],
-                                                          data[0],
-                                                          absorption_mean),
-                             corrected_sigma_small]
-
-        corrected_all_flux.append([data[0], corrected_flux,
-                                   corrected_sigma_full])
-
-    return (fits, fits_eval_stamp, stamps, params, corr_stamps, EW_lines,
-            EW_hb_samples, corrected_all_flux, EW_hb_der, EW_hb_der_err,
-            EW_hb_stack, EW_hb_der_mc, EW_hb_weight_stack, line_significance)
 
 
 # Model flux for lines in list
@@ -504,84 +340,321 @@ def model_flux_list(class_, stamp, linelist, sigmas,
     return out
 
 
-# Model fluxes offr H alpha and H beta
-def model_fluxes_ha_hb(class_, lines, data, sigmas, corrected_data,
-                       save_data=None, num_mc=100):
-    stamps_flux = get_stamps(class_, data, lines)
-    results = {}
-    for i, line in enumerate(lines):
-        fits_or, fits_corr = [], []
-        As_or, As_corr = [], []
-        for j in range(num_mc):
-            yoff_or = stamps_flux[i][1] + np.random.randn(len(stamps_flux[i][1])) * stamps_flux[i][2]
-            yoff_corr = corrected_data[line][1] + np.random.randn(len(corrected_data[line][1])) * corrected_data[line][2]
-            fit_or = model_flux_list(class_,
-                                     (stamps_flux[i][0],
-                                      yoff_or, stamps_flux[i][2]),
-                                     [line], plot=False, sigmas=sigmas)
-            fit_corr = model_flux_list(class_,
-                                       (corrected_data[line][0],
-                                        yoff_corr, corrected_data[line][2]),
-                                       [line], plot=False, sigmas=sigmas)
-            fits_or.append(fit_or)
-            fits_corr.append(fit_corr)
-            A_or = fit_or.params[f'{line}_broad_amplitude'].value + fit_or.params[f'{line}_narrow_amplitude'].value
-            A_corr = fit_corr.params[f'{line}_broad_amplitude'].value + fit_corr.params[f'{line}_narrow_amplitude'].value
-            As_or.append(A_or)
-            As_corr.append(A_corr)
+# ================================================================
+# EW DERIVATION
+# ================================================================
 
-        As_or = np.array(As_or)
-        As_corr = np.array(As_corr)
-        pct_diffs = (As_corr - As_or) / As_or * 100
+# Get EW from the MC params for a single H line
+def get_EW_from_mc(class_, label, As, vel=550):
 
-        diff = np.median(As_corr) - np.median(As_or)
-        combined_err = np.sqrt(np.std(As_corr)**2 + np.std(As_or)**2)
-        significance = diff / combined_err
+    w_center = class_.linelist_dict[label]
+    z = class_.redshift
+    mu = w_center * (1 + z)
+    sigma = w_center * (1 + z) * vel / 3e5
 
-        results[line] = {
-            'fits_or': fits_or,
-            'fits_corr': fits_corr,
-            'As_or': As_or,
-            'As_corr': As_corr,
-            'pct_diffs': pct_diffs,
-            'significance': significance,
-        }
-        if save_data is not None:
-            pd_dict = pd.DataFrame(results)
-            pd_dict.to_csv(f'{save_data}/results_all_{class_.names[0][:-5]}.csv')
-    return results
+    As = np.array(As)
+    height, m, n = As[:, 0], As[:, 1], As[:, 2]
 
+    continuum_at_mu = m * mu + n
+    EW = (height * np.sqrt(2 * np.pi * sigma**2)
+          / continuum_at_mu
+          / (1 + z))
+
+    return EW
+
+
+# Model all lines from a list and correct data
+def model_from_list_lines(class_, data, sigmas,
+                          lines, vel=550, n_mc=1000, min_amp_sigma=3.0):
+
+    fits, fits_eval_stamp, stamps, params = {}, {}, {}, {}
+    corrected_flux = data[1].copy()
+    corr_stamps, EW_lines, EW_hb_samples, EW_hb_weights = {}, {}, [], []
+    line_significance = {}
+    corrected_all_flux = []
+
+    for line in lines:
+        masked_data = mask_nonuse_emission_line(
+            class_, sigmas, line, [data[0], corrected_flux, data[2]])
+        isolated_data = isolate_emission_line(
+            class_, line, datas=masked_data)
+        stamps[line] = isolated_data
+
+        fit_mc, comps, param = model_mc_abs(class_, line, isolated_data,
+                                            sigmas, vel=vel, n_mc=n_mc)
+        param = np.asarray(param)
+        params[line] = param
+        fits[line] = fit_mc
+        fits_eval_stamp[line] = comps
+
+        absorption = neg_gauss(class_, line, data[0],
+                               np.mean(param, axis=0)[0])
+        corrected_flux -= absorption
+
+        corr_stamps[line] = [isolated_data[0],
+                             isolated_data[1] - comps[0][f'{line}_'],
+                             isolated_data[2]]
+
+        if line == 'H1_3970A':
+            continue
+
+        EW_line = get_EW_from_mc(class_, line, param, vel=vel)
+        EW_lines[line] = EW_line
+
+        EW_hb_line = EW_line / EW_all_ratios[line]
+        EW_hb_samples.append(EW_hb_line)
+
+        # --- per-draw weight (amplitude vs local continuum noise) ---
+        amplitude = param[:, 0]
+        noise_level = np.median(isolated_data[2])
+        significance = np.abs(amplitude) / noise_level
+        weight_draw = np.clip(significance / min_amp_sigma, 0, 1)
+        weight_draw = np.where(amplitude > 0, weight_draw, 0.0)
+
+        # line-level weight (is the fit consistent with zero overall?) ---
+        mean_amplitude = np.mean(amplitude)
+        amplitude_std = np.std(amplitude)
+        amplitude_std_safe = amplitude_std if amplitude_std > 0 else np.inf
+        sig_line = np.abs(mean_amplitude) / amplitude_std_safe
+        line_significance[line] = sig_line
+        weight_line_level = np.clip(sig_line / min_amp_sigma, 0, 1)
+
+        weight_line = weight_draw * weight_line_level
+        EW_hb_weights.append(weight_line)
+
+    EW_hb_stack = np.array(EW_hb_samples)          # shape (n_lines, n_mc)
+    EW_hb_weight_stack = np.array(EW_hb_weights)   # shape (n_lines, n_mc)
+
+    weight_sum = np.sum(EW_hb_weight_stack, axis=0)
+    weight_sum_safe = np.where(weight_sum == 0, 1, weight_sum)
+    EW_hb_der_mc = np.sum(EW_hb_stack * EW_hb_weight_stack, axis=0) / weight_sum_safe
+    EW_hb_der_mc = np.where(weight_sum == 0,
+                            np.mean(EW_hb_stack, axis=0),
+                            EW_hb_der_mc)
+
+    EW_hb_der = np.mean(EW_hb_der_mc)
+    EW_hb_der_err = np.std(EW_hb_der_mc)
+
+    line_der = ['H1_6563A', 'H1_4861A']
+    for line in line_der:
+        masked_data = mask_nonuse_emission_line(
+            class_, sigmas, line, [data[0], corrected_flux, data[2]])
+        isolated_data = isolate_emission_line(
+            class_, line, datas=masked_data)
+        stamps[line] = isolated_data
+
+        fit_mc, comps, param = model_mc_abs(class_, line, isolated_data,
+                                            sigmas, vel=vel, n_mc=n_mc)
+        params[line] = param
+        absorption_mc = np.zeros((n_mc, len(data[0])))
+        for i in range(n_mc):
+            EW_single = EW_hb_der_mc[i] * EW_all_ratios[line]
+            absorption_mc[i] = neg_gauss_EW_single(class_, line, data[0],
+                                                   param[i],
+                                                   EW_single,
+                                                   vel=vel)
+
+        absorption_mean = np.mean(absorption_mc, axis=0)
+        absorption_std = np.std(absorption_mc, axis=0)
+
+        corrected_flux -= absorption_mean
+        corrected_sigma_full = np.sqrt(data[2]**2 + absorption_std**2)
+
+        absorption_std_small = np.interp(isolated_data[0], data[0],
+                                         absorption_std)
+        corrected_sigma_small = np.sqrt(isolated_data[2]**2 +
+                                        absorption_std_small**2)
+
+        corr_stamps[line] = [isolated_data[0],
+                             isolated_data[1] - np.interp(isolated_data[0],
+                                                          data[0],
+                                                          absorption_mean),
+                             corrected_sigma_small]
+
+        corrected_all_flux.append([data[0], corrected_flux,
+                                   corrected_sigma_full])
+
+    return (fits, fits_eval_stamp, stamps, params, corr_stamps, EW_lines,
+            EW_hb_samples, corrected_all_flux, EW_hb_der, EW_hb_der_err,
+            EW_hb_stack, EW_hb_der_mc, EW_hb_weight_stack, line_significance)
+
+
+# ================================================================
+# EW PROPAGATION
+# ================================================================
+
+# Model how this affects the Hb line
+def model_hb_effect(class_, sigmas, EW_hb_stack, params, stamps,
+                    weights=None, vel=550,
+                    save_path=f'{proj_DIR}images_try'):
+
+    line = 'H1_4861A'
+    param_all = np.asarray(params[line])
+    median_param = np.median(param_all, axis=0)
+
+    stamp_wave, stamp_flux, stamp_err = stamps[line]
+
+    EW_hb_flat = np.asarray(EW_hb_stack).flatten()
+    n_total = len(EW_hb_flat)
+
+    corrected_stamp_flux = np.zeros((n_total, len(stamp_wave)))
+    fits, amplitudes = [], []
+
+    for idx in range(n_total):
+        absorption_stamp = neg_gauss_EW_single(class_, line, stamp_wave,
+                                               median_param, EW_hb_flat[idx],
+                                               vel=vel)
+        corrected_stamp_flux[idx] = stamp_flux - absorption_stamp
+
+        fit = model_flux_list(class_, (stamp_wave, corrected_stamp_flux[idx],
+                                       stamp_err),
+                              [line], sigmas)
+        fits.append(fit)
+
+        A_broad = fit.params[f'{line}_broad_amplitude'].value
+        A_narrow = fit.params[f'{line}_narrow_amplitude'].value
+        amplitudes.append(A_broad + A_narrow)
+
+    amplitudes = np.array(amplitudes)
+
+    if weights is not None:
+        weights_flat = np.asarray(weights).flatten()
+        if len(weights_flat) != n_total:
+            raise ValueError(f'weights length ({len(weights_flat)}) does not '
+                             f'match number of EW samples ({n_total})')
+    else:
+        weights_flat = None
+
+    if save_path is not None:
+        h5_path = f'{save_path}/corr_flux_{class_.names[0][:-5]}.h5'
+        with h5py.File(h5_path, 'w') as f:
+            f.create_dataset('corr_stamp_flux', data=corrected_stamp_flux,
+                             compression='gzip')
+            f.create_dataset('stamp_wave', data=stamp_wave)
+            f.create_dataset('amplitudes', data=amplitudes)
+            if weights_flat is not None:
+                f.create_dataset('weight', data=weights_flat)
+        print(f'Saved corrected fluxes to {h5_path}')
+
+    df_summary = pd.DataFrame({'amplitudes': amplitudes})
+    if weights_flat is not None:
+        df_summary['weight'] = weights_flat
+
+    if save_path is not None:
+        csv_path = f'{save_path}/EW_summary_{class_.names[0][:-5]}.csv'
+        df_summary.to_csv(csv_path, index=False)
+        print(f'Saved summary table to {csv_path}')
+
+    return df_summary, corrected_stamp_flux, fits
+
+
+# Compare corrected amplitudes (already computed once each) against an MC
+# reference distribution built from the uncorrected data
+
+def compare_corrected_to_original(class_, stamps, sigmas, amplitudes_corr,
+                                  line='H1_4861A', save_data=None, num_mc=1000):
+
+    stamp = stamps[line]
+
+    # --- MC only on the uncorrected/original data, to get a reference distribution ---
+    As_or = []
+    for j in range(num_mc):
+        yoff_or = stamp[1] + np.random.randn(len(stamp[1])) * stamp[2]
+        fit_or = model_flux_list(class_, (stamp[0], yoff_or, stamp[2]),
+                                 [line], sigmas=sigmas, plot=False)
+        A_or = (fit_or.params[f'{line}_broad_amplitude'].value
+                + fit_or.params[f'{line}_narrow_amplitude'].value)
+        As_or.append(A_or)
+    As_or = np.array(As_or)
+
+    amplitudes_corr = np.asarray(amplitudes_corr)
+
+    median_or = np.median(As_or)
+    median_corr = np.median(amplitudes_corr)
+    std_or = np.std(As_or)
+    std_corr = np.std(amplitudes_corr)
+
+    combined_err = np.sqrt(std_or**2 + std_corr**2)
+    significance = (median_corr - median_or) / combined_err
+
+    # percentage difference of each corrected sample relative to the
+    # uncorrected reference median
+    pct_diffs = (amplitudes_corr - median_or) / median_or * 100
+
+    result = {
+        'line': line,
+        'As_or': As_or,
+        'As_corr': amplitudes_corr,
+        'pct_diffs': pct_diffs,
+        'significance': significance,
+        'median_or': median_or,
+        'median_corr': median_corr,
+    }
+
+    if save_data is not None:
+        pd.DataFrame([{
+            'line': line, 'median_or': median_or,
+            'median_corr': median_corr, 'significance': significance,
+        }]).to_csv(f'{save_data}/results_summary_{class_.names[0][:-5]}.csv',
+                   index=False)
+
+    return {line: result}
+
+
+# ================================================================
+# Pipeline
+# ================================================================
 
 # Whole algorithm modeling all lines + plots + saving data
-def all_lines_balmer_estimation(class_, data, sigmas, vel=550,
+def all_lines_balmer_estimation(class_, data, sigmas, EW_hb_stack=None, vel=550,
+                                used_threshold=1.0,
                                 save_path=f'{proj_DIR}images_try'):
     lines = list(EW_all_ratios.keys())[2:-1]
     lines.append('H1_3970A')
 
     fit_estimation = model_from_list_lines(class_,
-                                           data,
-                                           sigmas,
-                                           lines,
-                                           vel=vel)
+                                            data,
+                                            sigmas,
+                                            lines,
+                                            vel=vel)
     (fits, fits_eval_stamp, stamps, params,
      corr_stamps, EW_lines,
      EW_hb_samples, corrected_all_flux,
      EW_hb_der, EW_hb_der_err,
-     EW_hb_stack, EW_hb_der_mc) = fit_estimation
+     EW_hb_stack_der, EW_hb_der_mc,
+     EW_hb_weight_stack, line_significance) = fit_estimation
 
     fig1 = plot_all_fits(class_, lines, stamps, params,
                          save_path=save_path)
-    fig2, fig3 = plot_ew_histograms(class_, EW_hb_samples,
-                                    save_path=save_path)
 
-    results = model_fluxes_ha_hb(class_, lines[:-1],
-                                 data, sigmas, corr_stamps,
-                                 save_data=save_path,
-                                 num_mc=1000)
+    lines_no_3970 = [l for l in lines if l != 'H1_3970A']
+    fig_hist, fig_all, fig_scatter, fig_bar, fig_used = plot_ew_histograms(
+        class_, EW_hb_samples, weights=EW_hb_weight_stack,
+        lines=lines_no_3970, line_significance=line_significance,
+        used_threshold=used_threshold, save_path=save_path)
 
-    fig4 = plot_pct_diff_histograms(class_, results, save_path=save_path)
+    # --- get per-sample corrected amplitudes (single fit per sample, no MC here) ---
+    # EW_hb_stack must be the (n_param, group_size) array of Hb-equivalent EW
+    # samples you want to propagate -- pass explicitly if computed elsewhere,
+    # otherwise reshape EW_hb_der_mc as needed before calling this function.
+    if EW_hb_stack is None:
+        raise ValueError('EW_hb_stack (per-sample EW array for model_hb_effect) '
+                          'must be provided.')
 
-    return results, fit_estimation, fig1, fig2, fig3, fig4
+    df_summary, corrected_flux, hb_fits, amplitudes_corr = model_hb_effect(
+        class_, data, sigmas, EW_hb_stack, params,
+        weights=np.asarray(EW_hb_weight_stack).flatten(),
+        vel=vel, save_path=save_path)
+
+    # --- compare corrected amplitudes against MC reference from original data ---
+    results = compare_corrected_to_original(
+        class_, lines[:-1], data, sigmas, amplitudes_corr,
+        save_data=save_path, num_mc=1000)
+
+    fig_pct = plot_pct_diff_histograms(class_, results, save_path=save_path)
+
+    return (results, fit_estimation, df_summary, amplitudes_corr,
+            fig1, fig_hist, fig_all, fig_scatter, fig_bar, fig_used, fig_pct)
 
 
 # ---------------------------------------------
@@ -759,8 +832,8 @@ def plot_all_fits(class_, balmer_lines, stamps, params,
 
 
 def plot_ew_histograms(class_, EW_hb_samples, weights=None, lines=None,
-                        line_significance=None, used_threshold=0.5,
-                        save_path=None):
+                       line_significance=None, used_threshold=0.5,
+                       save_path=None):
     if lines is None:
         lines = ['H1_4340A', 'H1_4102A', 'H1_3889A', 'H1_3835A',
                  'H1_3798A', 'H1_3771A']
@@ -771,7 +844,7 @@ def plot_ew_histograms(class_, EW_hb_samples, weights=None, lines=None,
 
     # ---- Histograms: used vs discarded samples, colored separately ----
     fig, axs = plt.subplots(nrows, ncols, squeeze=False,
-                             figsize=(4*ncols, 3*nrows))
+                            figsize=(4*ncols, 3*nrows))
     axs_flat = axs.flatten()
 
     n_used_list, n_discarded_list = [], []
@@ -829,7 +902,7 @@ def plot_ew_histograms(class_, EW_hb_samples, weights=None, lines=None,
     fig3 = None
     if weights is not None:
         fig3, axs3 = plt.subplots(nrows, ncols, squeeze=False,
-                                   figsize=(4*ncols, 3*nrows))
+                                  figsize=(4*ncols, 3*nrows))
         axs3_flat = axs3.flatten()
 
         for i, line in enumerate(lines):
@@ -837,11 +910,11 @@ def plot_ew_histograms(class_, EW_hb_samples, weights=None, lines=None,
             w = weights[i]
             used_mask = w >= used_threshold
             ax.scatter(EW_hb_samples[i][used_mask], w[used_mask],
-                      s=5, alpha=0.5, color='tab:blue', label='used')
+                       s=5, alpha=0.5, color='tab:blue', label='used')
             ax.scatter(EW_hb_samples[i][~used_mask], w[~used_mask],
-                      s=5, alpha=0.5, color='tab:red', label='discarded')
+                       s=5, alpha=0.5, color='tab:red', label='discarded')
             ax.axhline(used_threshold, color='green', linestyle=':',
-                      alpha=0.7, label=f'threshold={used_threshold}')
+                       alpha=0.7, label=f'threshold={used_threshold}')
 
             title = line
             if line_significance is not None and line in line_significance:
@@ -869,7 +942,7 @@ def plot_ew_histograms(class_, EW_hb_samples, weights=None, lines=None,
         x = np.arange(n_lines)
         ax4.bar(x, n_used_list, label='used', color='tab:blue')
         ax4.bar(x, n_discarded_list, bottom=n_used_list,
-               label='discarded', color='tab:red')
+                label='discarded', color='tab:red')
 
         xtick_labels = lines
         if line_significance is not None:
@@ -899,10 +972,10 @@ def plot_ew_histograms(class_, EW_hb_samples, weights=None, lines=None,
 
         if n_used_all > 0:
             axs2[0].hist(all_EW_hb[used_mask_all], bins=30, alpha=0.6,
-                        color='tab:blue', label=f'used (n={n_used_all})')
+                         color='tab:blue', label=f'used (n={n_used_all})')
         if n_discarded_all > 0:
             axs2[0].hist(all_EW_hb[~used_mask_all], bins=30, alpha=0.6,
-                        color='tab:red', label=f'discarded (n={n_discarded_all})')
+                         color='tab:red', label=f'discarded (n={n_discarded_all})')
 
         if n_used_all > 0:
             mean_used_all = np.mean(all_EW_hb[used_mask_all])
@@ -940,11 +1013,11 @@ def plot_ew_histograms(class_, EW_hb_samples, weights=None, lines=None,
         all_used_EW_concat = np.concatenate(all_used_EW)
         fig5, ax5 = plt.subplots(figsize=(6, 4))
         ax5.hist(all_used_EW_concat, bins=30, alpha=0.8, color='tab:blue',
-                label=f'used only (n={len(all_used_EW_concat)})')
+                 label=f'used only (n={len(all_used_EW_concat)})')
         mean_used_only = np.mean(all_used_EW_concat)
         std_used_only = np.std(all_used_EW_concat)
         ax5.axvline(mean_used_only, color='black', linestyle='--',
-                   label=f'mean={mean_used_only:.2f} ± {std_used_only:.2f}')
+                    label=f'mean={mean_used_only:.2f} ± {std_used_only:.2f}')
         ax5.set_title('All Balmer lines combined (used samples only)')
         ax5.set_xlabel(r'EW ($H_\beta$)')
         ax5.set_ylabel('Count')
@@ -958,69 +1031,9 @@ def plot_ew_histograms(class_, EW_hb_samples, weights=None, lines=None,
     return fig, fig2, fig3, fig4, fig5
 
 
-def plot_corr_flux(data, corrected_all_flux, line,
-                   xlim=(4000, 4500), save_path=None):
-    wave, flux = data[0], data[1]
-    print(corrected_all_flux)
-    fig = plt.figure(figsize=(8, 5))
-    plt.step(wave, flux, color='grey', label='Original flux', lw=1,
-             drawstyle='steps-mid', alpha=0.5)
-    plt.step(corrected_all_flux[0], corrected_all_flux[1],
-             color='blue', label='Corrected flux', lw=1, drawstyle='steps-mid',
-             alpha=0.5)
-    plt.title(f'Flux comparison for {line}')
-    plt.xlabel('Wavelength (Å)')
-    plt.ylabel('Flux')
-    plt.legend()
-    plt.xlim(xlim)
-    plt.tight_layout()
-    if save_path is not None:
-        plt.savefig(save_path, format='png')
-    plt.show()
-    return fig
-
-
 # ----------------------------------------------
 # Checking uncertainties
 # ----------------------------------------------
-
-
-# Model how this affects the Hb line
-def model_hb_effect(class_, data, sigmas, EW_hb_stack, params, vel=550):
-    line = 'H1_4861A'
-    param = params[line]
-    n_param, group_size = EW_hb_stack.shape
-
-    lines_to_fit = ['H1_6563A', 'H1_4861A', 'O3_5007A',
-                    'N2_6548A', 'N2_6583A']
-
-    corrected_flux = np.zeros((n_param * group_size, len(data[1])))
-    fits, amplitudes = [], []
-    idx = 0
-    for p in range(n_param):
-        for j in range(group_size):
-            absorption = neg_gauss_EW_single(class_, line, data[0],
-                                             param[p], EW_hb_stack[p, j],
-                                             vel=vel)
-            corrected_flux[idx] = data[1] - absorption
-
-            fit = model_flux_list(class_, (data[0], corrected_flux[idx],
-                                           data[2]),
-                                  lines_to_fit, sigmas)
-            fits.append(fit)
-
-            A_broad = fit.params[f'{line}_broad_amplitude'].value
-            A_narrow = fit.params[f'{line}_narrow_amplitude'].value
-            amplitude = A_broad + A_narrow
-            amplitudes.append(amplitude)
-            print(idx)
-            idx += 1
-
-    df = pd.DataFrame({'corr_flux': list(corrected_flux),
-                       'fits': fits,
-                       'amplitudes': amplitudes})
-    df.to_csv(f'{proj_DIR}images_try/EW_fluxes_{class_.names[0][:-5]}.csv')
-    return df
 
 
 def dust_correction():
@@ -1051,25 +1064,3 @@ def dust_correction():
         df.loc[-1] = all_rows
         df.index = df.index + 1
     # df.to_csv(DIR + 'lines/magE2024_master_Dcorr_parts.csv')
-
-
-# def peaks_estimation(class_, fit_estimation,
-#                      save_path='/Users/javieratoro/Desktop/thesis/proyecto 2024-2/images_try'):
-#     (fits, fits_eval_stamp, stamps, params,
-#      corr_stamps, EW_lines,
-#      EW_hb_samples, corrected_all_flux,
-#      EW_hb_der, EW_hb_der_err,
-#      EW_hb_stack, EW_hb_der_mc) = fit_estimation
-
-#     lines_to_use = list(EW_all_ratios.keys())
-#     lines_to_use.append('H1_3970A')
-#     peak_locations, line_to_group, _ = find_ew_groups_kde(EW_hb_samples,
-#                                                           lines_to_use)
-#     group_stats = get_group_ew_stats(EW_hb_samples, lines_to_use,
-#                                      line_to_group, peak_locations)
-
-#     if save_path is not None:
-#         pd_df = pd.DataFrame(group_stats)
-#         pd_df.to_csv(f'{save_path}/groups_{class_.names[0][:-5]}.csv')
-
-#     return group_stats
