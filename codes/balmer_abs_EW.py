@@ -227,7 +227,8 @@ def model_single_abs(class_, label, datas, sigmas, vel=550):
     pars_mult = comp_mult.make_params()
 
     pars_mult.add(name='z', value=class_.redshift, vary=False)
-    pars_mult.add(name='sigma_v', value=vel, vary=False)
+    pars_mult.add(name='sigma_v', value=vel, vary=True,
+                  min=vel-50, max=vel+50)
 
     for param in ['center', 'amplitude', 'sigma']:
         narrow_key = f'{label}_{param}'
@@ -235,7 +236,7 @@ def model_single_abs(class_, label, datas, sigmas, vel=550):
             value, vary_, min_, max_ = lam, False, None, None
             expr = f'{lam:6.2f}*(1+z)'
         elif param == 'amplitude':
-            value, vary_, min_, max_ = -50, True, -100, 0
+            value, vary_, min_, max_ = -20, True, -100, 0
             expr = None
         else:  # sigma
             value, vary_, min_, max_ = None, False, None, None
@@ -1032,35 +1033,147 @@ def plot_ew_histograms(class_, EW_hb_samples, weights=None, lines=None,
 
 
 # ----------------------------------------------
-# Checking uncertainties
+# Ultimate pipeline for correction
 # ----------------------------------------------
 
 
-def dust_correction():
-    names = ['J0023', 'J0136', 'J0020', 'J0203', 'J0243', 'J0333',
-             'J0404', 'J2204', 'J2258', 'J2336', 'J0328']
+def default_balmer_lines_to_correct():
+    """
+    Every line in EW_all_ratios EXCEPT H_alpha/H_beta, plus H1_3970A
+    (H_epsilon, which has no Aver ratio but is still corrected using
+    its own directly-fitted amplitude).
+    """
+    exclude = {'H1_6563A', 'H1_4861A'}
+    lines = [line for line in EW_all_ratios if line not in exclude]
+    lines.append('H1_3970A')
+    return lines
 
-    columns_ = ['ID', 'mass', 'z_red', 'z_blue']
-    for line in lines['name']:
-        columns_.append(line + '_flux')
-        columns_.append(line + '_fluxerr')
 
-    df = pd.DataFrame(columns=columns_)
+def correct_balmer_lines(class_, data, sigmas, lines, vel=550, n_mc=1000):
+    """
+    For each line in `lines`: isolate it, fit it n_mc times via MC,
+    take the MEDIAN fitted amplitude, and subtract that single
+    Gaussian from the full spectrum. Also records each line's EW
+    (median + std across the n_mc fits) -- recorded only, not used
+    for any correction here.
+    """
+    corrected_flux = data[1].copy()
+    stamps, params, medians, ew_info = {}, {}, {}, {}
 
-    for name in names:
-        data = pd.read_csv(DIR + f'lines/{name}/{name}_model_parts.csv')
-        all_rows = {'ID': data['ID'][0], 'mass': data['mass'][0],
-                    'z_red': data['z_red'][0], "z_blue": data['z_blue'][0]}
-        for line in lines['name']:
-            print(f'Correcting line {line}')
-            wl = lines[lines['name'] == line]['vacuum_wave'].values
-            E_BV, _ = E_BV_(name)
-            flux, fluxerr = get_flux(name, line)
-            f_corr = f_int(wl, flux, E_BV)
-            f_corr_err = f_int(wl, fluxerr, E_BV)
-            all_rows[line + '_flux'] = f_corr[0]
-            all_rows[line + '_fluxerr'] = f_corr_err[0]
+    for line in lines:
+        print(f'Correcting {line}...')
+        masked_data = mask_nonuse_emission_line(
+            class_, sigmas, line, [data[0], corrected_flux, data[2]])
+        isolated_data = isolate_emission_line(
+            class_, line, datas=masked_data)
+        stamps[line] = isolated_data
 
-        df.loc[-1] = all_rows
-        df.index = df.index + 1
-    # df.to_csv(DIR + 'lines/magE2024_master_Dcorr_parts.csv')
+        _, _, param = model_mc_abs(
+            class_, line, isolated_data, sigmas, vel=vel, n_mc=n_mc)
+        param = np.asarray(param)
+        params[line] = param
+
+        median_height = np.median(param[:, 0])
+        medians[line] = median_height
+
+        # EW computed and recorded for later use -- NOT applied here
+        EW_samples = get_EW_from_mc(class_, line, param, vel=vel)
+        ew_info[line] = (np.median(EW_samples), np.std(EW_samples))
+
+        absorption = neg_gauss(class_, line, data[0], median_height)
+        corrected_flux -= absorption
+
+    return corrected_flux, stamps, params, medians, ew_info
+
+
+def save_corrected_data(class_, data, corrected_flux, save_dir):
+    """
+    Save the Balmer-absorption-corrected spectrum to a CSV, matching
+    the existing file-handoff pattern used elsewhere in the pipeline.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = f'{save_dir}/bcorr_{class_.gal_id}_new.csv'
+
+    df = pd.DataFrame({'wave': data[0], 'flux': corrected_flux,
+                       'sigma': data[2]})
+    df.to_csv(save_path, index=False)
+
+    print(f'Saved Balmer absorption corrected data to: {save_path}')
+    return save_path
+
+
+def save_ew_info(class_, ew_info, save_dir):
+    """
+    Save each line's EW (median + std across the n_mc fits) to a CSV,
+    for later use (e.g. a future H_alpha/H_beta ratio-based
+    correction). Purely a record -- not consumed by this pipeline.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = f'{save_dir}/ew_info_{class_.gal_id}_new.csv'
+
+    df = pd.DataFrame([
+        {'line': line, 'EW_median': med, 'EW_std': std}
+        for line, (med, std) in ew_info.items()
+    ])
+    df.to_csv(save_path, index=False)
+
+    print(f'Saved EW info to: {save_path}')
+    return save_path
+
+
+def save_mc_realizations(class_, params, save_dir):
+    """
+    Save the FULL set of n_mc MC realizations (not just the median) for
+    every line, to an HDF5 file. One group per line, containing:
+      - height : array (n_mc,) - fitted amplitude per realization
+      - m, n   : arrays (n_mc,) - fitted linear continuum per realization
+      - EW     : array (n_mc,) - EW computed from that realization
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = f'{save_dir}/mc_realizations_{class_.gal_id}_new.h5'
+
+    with h5py.File(save_path, 'w') as f:
+        for line, param in params.items():
+            grp = f.create_group(line)
+            grp.create_dataset('height', data=param[:, 0], compression='gzip')
+            grp.create_dataset('m', data=param[:, 1], compression='gzip')
+            grp.create_dataset('n', data=param[:, 2], compression='gzip')
+            EW_samples = get_EW_from_mc(class_, line, param)
+            grp.create_dataset('EW', data=EW_samples, compression='gzip')
+
+    print(f'Saved {len(params)} lines x {next(iter(params.values())).shape[0]} '
+          f'MC realizations to: {save_path}')
+    return save_path
+
+
+def run_balmer_correction_pipeline(class_, lines=None, vel=550, n_mc=1000,
+                                   save_dir=None):
+    """
+    Full pipeline: read data, estimate sigmas, correct every
+    intermediate Balmer line (median of n_mc MC fits per line), save
+    the corrected spectrum, save each line's EW summary, and save the
+    full n_mc realizations for every line.
+
+    Returns
+    -------
+    corrected_flux, stamps, params, medians, ew_info,
+    save_path, ew_path, mc_path
+    """
+    if lines is None:
+        lines = default_balmer_lines_to_correct()
+
+    if save_dir is None:
+        save_dir = f'{proj_DIR}bal_abs'
+
+    data = read_data(class_)
+    sigmas = first_sigma_est(class_, data, plot=False)
+
+    corrected_flux, stamps, params, medians, ew_info = correct_balmer_lines(
+        class_, data, sigmas, lines, vel=vel, n_mc=n_mc)
+
+    save_path = save_corrected_data(class_, data, corrected_flux, save_dir)
+    ew_path = save_ew_info(class_, ew_info, save_dir)
+    mc_path = save_mc_realizations(class_, params, save_dir)
+
+    return (corrected_flux, stamps, params, medians, ew_info,
+            save_path, ew_path, mc_path)
