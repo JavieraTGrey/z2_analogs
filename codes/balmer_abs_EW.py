@@ -227,8 +227,7 @@ def model_single_abs(class_, label, datas, sigmas, vel=550):
     pars_mult = comp_mult.make_params()
 
     pars_mult.add(name='z', value=class_.redshift, vary=False)
-    pars_mult.add(name='sigma_v', value=vel, vary=True,
-                  min=vel-50, max=vel+50)
+    pars_mult.add(name='sigma_v', value=vel, vary=False)
 
     for param in ['center', 'amplitude', 'sigma']:
         narrow_key = f'{label}_{param}'
@@ -236,7 +235,7 @@ def model_single_abs(class_, label, datas, sigmas, vel=550):
             value, vary_, min_, max_ = lam, False, None, None
             expr = f'{lam:6.2f}*(1+z)'
         elif param == 'amplitude':
-            value, vary_, min_, max_ = -20, True, -100, 0
+            value, vary_, min_, max_ = -30, True, -100, 0
             expr = None
         else:  # sigma
             value, vary_, min_, max_ = None, False, None, None
