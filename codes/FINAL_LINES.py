@@ -120,12 +120,11 @@ def get_stamp(class_, data, lines):
     return stamps
 
 
-
 # -----------------------------------------
 # Model function
 # -----------------------------------------
 
-def model_flux_list(class_, stamp, linelist, sigmas,
+def model_flux_list(class_, stamp, linelist, deg=1,
                     ratio=None, plot=False):
     z_init = class_.redshift
     linelist_dict = class_.linelist_dict
@@ -135,7 +134,7 @@ def model_flux_list(class_, stamp, linelist, sigmas,
     broad_gaussians = [
         GaussianModel(prefix=f'{label}_broad_') for label in linelist]
 
-    polydeg = 0
+    polydeg = deg
     polynomial = PolynomialModel(degree=polydeg)
 
     model = narrow_gaussians[0] + broad_gaussians[0]
@@ -145,20 +144,9 @@ def model_flux_list(class_, stamp, linelist, sigmas,
 
     pars = model.make_params()
 
-    pars.add('z', value=z_init, vary=True,
-             min=z_init - 1e-2, max=z_init + 1e-2)
+    pars.add('sigma_v_narrow', value=50, min=20, max=65, vary=True)
 
-    sigma_v_narrow, sigma_v_broad = sigmas
-
-    if sigma_v_narrow.value is None:
-        pars.add('sigma_v_narrow', value=50, min=20, max=65, vary=True)
-    else:
-        pars.add('sigma_v_narrow', value=sigma_v_narrow.value, vary=False)
-
-    if sigma_v_broad.value is None:
-        pars.add('sigma_v_broad', value=80, min=65, max=100, vary=True)
-    else:
-        pars.add('sigma_v_broad', value=sigma_v_broad.value, vary=False)
+    pars.add('sigma_v_broad', value=80, min=65, max=100, vary=True)
 
     if ratio is None:
         pars.add('broad_to_narrow_ratio', value=0.3, vary=True, min=0.0)
@@ -166,16 +154,20 @@ def model_flux_list(class_, stamp, linelist, sigmas,
         pars.add('broad_to_narrow_ratio', value=ratio, vary=False)
 
     for label in linelist:
+
+        pars.add(f'z_{label}', value=z_init, vary=True,
+                 min=0, max=0.1)
+
         lam0 = linelist_dict[label]
 
         pars.add(f'{label}_narrow_center', value=lam0, vary=False,
-                 expr=f'{lam0}*(1+z)')
+                 expr=f'{lam0}*(1+z_{label})')
         pars.add(f'{label}_narrow_amplitude', value=50, vary=True, min=0.0)
         pars.add(f'{label}_narrow_sigma', vary=False,
                  expr=f'(sigma_v_narrow/3e5)*{label}_narrow_center')
 
         pars.add(f'{label}_broad_center', value=lam0, vary=False,
-                 expr=f'{lam0}*(1+z)')
+                 expr=f'{lam0}*(1+z_{label})')
         pars.add(f'{label}_broad_amplitude', vary=False,
                  expr=f'broad_to_narrow_ratio*{label}_narrow_amplitude')
         pars.add(f'{label}_broad_sigma', vary=False,
@@ -341,7 +333,7 @@ def plotting_fit(lams, flux, fit, linelist, class_):
     # --- Emission line markers ---
     for label in linelist:
         obs_lam = (class_.linelist_dict[label] *
-                   (1 + fit.params['z'].value))
+                   (1 + fit.params[f'z_{label}'].value))
 
         ax.axvline(obs_lam, linestyle='--',
                    linewidth=0.5, color='grey')
