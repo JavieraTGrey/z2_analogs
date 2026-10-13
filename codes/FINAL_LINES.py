@@ -1,5 +1,4 @@
 import astropy.constants as const
-from GaussianFitting import fitSpectrum
 import numpy as np
 import matplotlib.pyplot as plt
 from lmfit.models import GaussianModel, PolynomialModel
@@ -11,6 +10,19 @@ proj_DIR = f"{main_DIR}proyecto 2024-2/"
 code_DIR = f"{proj_DIR}codes"
 os.chdir(code_DIR)
 
+
+def get_line_groups():
+    bright_lines = ['O2_3726A', 'O2_3729A', 'H1_6563A',
+                    'H1_4861A', 'H1_4340A', 'O3_5007A',
+                    'O3_4959A', 'N2_6548A', 'N2_6583A',
+                    'S2_6716A', 'S2_6731A']
+
+    bright_lines_group = [('O2_3726A', 'O2_3729A'),
+                          ('H1_4340A'), ('H1_4861A'),
+                          ('O3_4959A'), ('O3_5007A'),
+                          ('N2_6548A', 'H1_6563A', 'N2_6583A'),
+                          ('S2_6716A', 'S2_6731A')]
+    return bright_lines, bright_lines_group
 
 # -----------------------------------------
 # Data Preparation
@@ -224,69 +236,74 @@ def create_dict(class_, stamps, linelist_all, n_mc=100,
 
 def save_data_dict(class_, dict_, linelist):
 
-    linelist_ = np.asarray(linelist)
-    if linelist_.size == 1:
-        linelist = [linelist]
+    # dataframe setup
+    columns = ['label', 'i', 'sigma_v_narrow', 'sigma_v_broad',
+               'b_to_n_ratio', 'nar_amplitude',
+               'bro_amplitude']
+    rows = []
+    for lines in linelist:
+        line_ = np.asarray(lines)
+        if line_.size == 1:
+            lines = [lines]
 
-    # dataframe setup-
-    columns = ['i', 'sigma_v_narrow', 'sigma_v_broad',
-               'broad_to_narrow_ratio']
-    for label in linelist:
-        columns += [f'{label}_narrow_amplitude',
-                    f'{label}_broad_amplitude']
+        fits = dict_[lines[0]]
+        for line in lines:
+            for i, fit in enumerate(fits):
+                p = fit.params
+                rows.append({
+                    'label': line,
+                    'i': i,
+                    'sigma_v_narrow':       p['sigma_v_narrow'].value,
+                    'sigma_v_narrow_err':   p['sigma_v_narrow'].stderr,
+                    'sigma_v_broad':        p['sigma_v_broad'].value,
+                    'sigma_v_broad_err':    p['sigma_v_broad'].stderr,
+                    'b_to_n_ratio':         p['broad_to_narrow_ratio'].value,
+                    'b_to_n_ratio_err':     p['broad_to_narrow_ratio'].stderr,
+                    'nar_amplitude':     p[f'{line}_narrow_amplitude'].value,
+                    'bro_amplitude':      p[f'{line}_broad_amplitude'].value,
+                })
+    info = pd.DataFrame(rows, columns=columns)
 
+    res = info[(info['b_to_n_ratio'] > 0) & (info['b_to_n_ratio'] <= 1)].copy()
+    res['flux'] = res['nar_amplitude'] + res['bro_amplitude']
 
-    info = pd.DataFrame(columns=columns)
+    cols = columns[2:]+['flux']
 
-    for i in range(num):
-        yoff = np.random.randn(len(class_.flux)) * class_.sigma
-        fit, df = fit_auroral_new(class_, ratio, flux_=class_.flux + yoff)
-        info = pd.concat([info, df], ignore_index=True)
-        comps.append(fit)
+    g = res.groupby('label')
 
-    res = pd.DataFrame(columns=['ID', 'mass', 'z', 'name', 'flux',
-                                'fluxerr',
-                                'narrow_flux', 'narrow_fluxerr',
-                                'broad_flux', 'broad_fluxerr'])
+    summary = g[cols].median()
+    q = g['flux'].quantile([0.16, 0.84]).unstack()
+    summary['fluxerr'] = (q[0.84] - q[0.16]) / 2
+    summary['n_fits'] = g.size()
 
-    for label in info.columns[2:]:
-        if 'broad' in label:
-            continue
-        else:
-            label = label[:7]
-            narrow_ = np.asarray(info[label+"_narrow_amplitude"])
-            broad_ = np.asarray(info[label+"_broad_amplitude"])
-            flux = narrow_ + broad_
-            row = {'ID': class_.spectra.names[0],
-                   'mass': class_.spectra.mass,
-                   'z': class_.spectra.redshift,
-                   'name': label,
-                   'flux': np.median(flux),
-                   'fluxerr': np.std(flux),
-                   'narrow_flux': np.median(info[label+"_narrow_amplitude"]),
-                   'narrow_fluxerr': np.std(info[label+"_narrow_amplitude"]),
-                   'broad_flux': np.median(info[label+"_broad_amplitude"]),
-                   'broad_fluxerr': np.std(info[label+"_broad_amplitude"])}
-            res.loc[len(res)] = row
-
-    res.to_csv(f'{proj_DIR}lines/{class_.spectra.gal_id}/'
-               f'{class_.spectra.gal_id}_auroral_model_parts.csv',
-               index=False)
-    info.to_csv(f'{proj_DIR}lines/{class_.spectra.gal_id}/'
-                f'{class_.spectra.gal_id}_auroral_iter_parts.csv',
-                index=False)
-
-    return info, res
-
+    gal_id = class_.names[0][:5]
+    info.to_csv(f'{proj_DIR}new_results/{gal_id}/{gal_id}_lines_info.csv')
+    summary.to_csv(f'{proj_DIR}new_results/{gal_id}/{gal_id}_lines_summ.csv')
+    return info, summary
 
 # -----------------------------------------
 # Running algorithm
 # -----------------------------------------
 
 
+def measure_all_lines(class_, linelist_all, linelist_group, n_mc=100, deg=1,
+                      ratio=None, plot=False):
+    data = read_data(class_)
+    masked_data = mask_nonuse_emission_line(class_, linelist_all, data)
+    print('Getting stamps')
+    stamps = get_stamp(class_, masked_data, linelist_all)
+    print('MC line modeling')
+    dict_all = create_dict(class_, stamps, linelist_group, n_mc=n_mc,
+                           deg=deg, ratio=ratio, plot=plot)
+    print('Saving information')
+    info, summary = save_data_dict(class_, dict_all, linelist_group)
+    print('Done')
+    return info, summary
+
 # -----------------------------------------
 # Plotting functions
 # -----------------------------------------
+
 
 def plotting_fit(lams, flux, fit, linelist, class_):
     fig2, (ax, ax_res) = plt.subplots(
