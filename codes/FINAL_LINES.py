@@ -1,11 +1,10 @@
 import astropy.constants as const
+from GaussianFitting import fitSpectrum
 import numpy as np
 import matplotlib.pyplot as plt
 from lmfit.models import GaussianModel, PolynomialModel
-from lmfit.parameter import Parameter
 import pandas as pd
 import os
-import seaborn as sns
 
 main_DIR = "/Users/javieratoro/Desktop/thesis/"
 proj_DIR = f"{main_DIR}proyecto 2024-2/"
@@ -104,6 +103,7 @@ def mask_nonuse_emission_line(class_, lines, data):
     return wave, masked_flux, masked_sigma
 
 
+# Create stamp for each line we are measuring
 def get_stamp(class_, data, lines):
     wave, flux, err = data[0], data[1], data[2]
     lines_df = class_.line_list
@@ -124,6 +124,8 @@ def get_stamp(class_, data, lines):
 # Model function
 # -----------------------------------------
 
+
+# Model for a list of lines (could be just one)
 def model_flux_list(class_, stamp, linelist, deg=1,
                     ratio=None, plot=False):
     z_init = class_.redshift
@@ -146,7 +148,7 @@ def model_flux_list(class_, stamp, linelist, deg=1,
 
     pars.add('sigma_v_narrow', value=50, min=20, max=65, vary=True)
 
-    pars.add('sigma_v_broad', value=80, min=65, max=100, vary=True)
+    pars.add('sigma_v_broad', value=80, min=65, max=120, vary=True)
 
     if ratio is None:
         pars.add('broad_to_narrow_ratio', value=0.3, vary=True, min=0.0)
@@ -183,52 +185,56 @@ def model_flux_list(class_, stamp, linelist, deg=1,
         plotting_fit(stamp[0], stamp[1], out, linelist, class_)
     return out
 
-# -----------------------------------------
-# Running algorithm
-# -----------------------------------------
+
+# MC model running on a list of lines (can be individual)
+def MC_model_from_lines(class_, stamps, linelist, n_mc=100,
+                        deg=1, ratio=None, plot=False):
+
+    wave, flux, err = stamps[linelist[0]]
+
+    fits = []
+    for i in range(n_mc):
+        yoff = flux + np.random.randn(len(flux)) * err
+        fit = model_flux_list(class_, (wave, yoff, err), linelist,
+                              deg=deg, ratio=ratio, plot=plot)
+        fits.append(fit)
+
+    return fits
 
 
-# Sigma estimation for line masking
-def first_sigma_est(class_, data, list, plot=False):
-    """
-    Get the velocity dispersion (sigma) and ratios of the narrow and/or broad
-    Gaussian components from the spectral fitting.
+# Create dict with MC fits of every line in list
+def create_dict(class_, stamps, linelist_all, n_mc=100,
+                deg=1, ratio=None, plot=False):
+    dict_ = {}
+    for linelist in linelist_all:
+        linelist_ = np.asarray(linelist)
+        if linelist_.size == 1:
+            linelist = [linelist]
 
-    Add plot=True to visualize the spectral fitting model
-    """
-    wave, flux, sigma = data
+        fits = MC_model_from_lines(class_, stamps, linelist, n_mc=n_mc,
+                                   deg=deg, ratio=ratio, plot=plot)
+        dict_[linelist[0]] = fits
+    return dict_
 
-    fit = fitSpectrum(wave, flux, sigma,
-                      linelist=list,
-                      z_init=class_.redshift,
-                      weights=1 / sigma**2,
-                      showPlot=plot,
-                      broad=True, nfev=1000)
-
-    sigma_narrow = fit.params['sigma_v_narrow']
-    sigma_broad = fit.params['sigma_v_broad']
-
-    return fit
 
 # -----------------------------------------
 # Save information
 # -----------------------------------------
 
 
-def save_data_auroral_MC(class_, ratio, num):
-    auroral_lines = ['S2_4068', 'O3_4363',
-                     'N2_5756', 'O1_6300',
-                     'O1_6363', 'S3_6312',
-                     'O2_7320']
-    comps = []
+def save_data_dict(class_, dict_, linelist):
 
-    # dataframe setup
-    columns = ['sigma_v_narrow', 'sigma_v_broad']
-    for label in auroral_lines:
+    linelist_ = np.asarray(linelist)
+    if linelist_.size == 1:
+        linelist = [linelist]
+
+    # dataframe setup-
+    columns = ['i', 'sigma_v_narrow', 'sigma_v_broad',
+               'broad_to_narrow_ratio']
+    for label in linelist:
         columns += [f'{label}_narrow_amplitude',
                     f'{label}_broad_amplitude']
-    columns += ['O2_7331_narrow_amplitude', 'O2_7331_broad_amplitude',
-                'S2_4076_narrow_amplitude', 'S2_4076_broad_amplitude']
+
 
     info = pd.DataFrame(columns=columns)
 
@@ -271,6 +277,11 @@ def save_data_auroral_MC(class_, ratio, num):
                 index=False)
 
     return info, res
+
+
+# -----------------------------------------
+# Running algorithm
+# -----------------------------------------
 
 
 # -----------------------------------------
