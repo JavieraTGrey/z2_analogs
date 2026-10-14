@@ -2,12 +2,12 @@
 Calculate and correct for dust on the galaxies
 """
 
-import os
+from GALAXIES import PROJ_DIR
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-from GALAXIES import PROJ_DIR
-
+import os
+import pyneb as pn
 
 # -----------------------------------------
 # Overall information
@@ -193,15 +193,10 @@ def case_b_ratios(labels, vac_dict, linelist_dict=None, tem=1e4, den=100.0):
     """F(line)/F(H-beta) for Case B. Uses PyNeb when installed (all Balmer
     and Paschen lines), otherwise the Balmer fallback table."""
 
-    try:
-        import pyneb as pn
-        H1 = pn.RecAtom('H', 1)
-        hb = H1.getEmissivity(tem, den, 4, 2)
-        source = 'PyNeb'
-    except Exception:
-        pn = None
-        source = 'fallback table (Storey & Hummer 1995)'
- 
+    H1 = pn.RecAtom('H', 1)
+    hb = H1.getEmissivity(tem, den, 4, 2)
+    source = 'PyNeb'
+
     ratios = {}
     for lab in labels:
         wl = rest_wavelength(lab, linelist_dict)
@@ -211,12 +206,7 @@ def case_b_ratios(labels, vac_dict, linelist_dict=None, tem=1e4, den=100.0):
                 print(f'  {lab}: no H I transition near {wl:.1f} A, skipped')
                 continue
             ratios[lab] = float(H1.getEmissivity(tem, den, *lev) / hb)
-        else:
-            key = min(CASE_B_FALLBACK, key=lambda w: abs(w - wl))
-            if abs(key - wl) < 3:
-                ratios[lab] = CASE_B_FALLBACK[key]
-            else:
-                print(f'  {lab}: not in fallback table (install PyNeb), skipped')
+
     print(f'Case B ratios from {source}, T={tem:.0f} K, n_e={den:.0f} cm^-3')
     return ratios
 
@@ -233,6 +223,7 @@ def rest_wavelength(label, linelist_dict=None):
 # Load saved MC fluxes
 # ================================================================
 
+# Get Path
 def info_path(gal_id, results_dir=None):
     results_dir = results_dir or f'{PROJ_DIR}new_results'
     return f'{results_dir}/{gal_id}/{gal_id}_lines_info.csv'
@@ -259,41 +250,57 @@ def load_flux_samples(gal_id, results_dir=None, info=None):
 # ================================================================
 # E(B-V)
 # ================================================================
- 
-def select_hydrogen_lines(F, linelist_dict=None, exclude=EXCLUDE_DEFAULT,
+
+def select_hydrogen_lines(file_table, linelist_dict=None,
+                          exclude=EXCLUDE_DEFAULT,
                           min_snr=3.0):
-    """H I lines with S/N >= min_snr (from the MC spread), minus blends."""
-    labels = [c for c in F.columns if c.startswith('H1_')]
+    """
+    H I lines with S/N >= min_snr (from the MC spread),
+    minus selected lines
+    """
+    # Get all labels for Hydrogen lines
+    labels = [c for c in file_table.columns if c.startswith('H1_')]
+
     keep = []
     for lab in labels:
-        v = F[lab].dropna()
+        # Get 100 iteration info for lab
+        v = file_table[lab].dropna()
         q16, q50, q84 = np.percentile(v, [16, 50, 84])
-        snr = q50 / max((q84 - q16) / 2, 1e-30)
+        snr = q50 / max((q84 - q16) / 2, 1e-30)  # Evita dividir by 0
+
         if lab in exclude:
             print(f'  {lab}: excluded (blend)')
         elif snr < min_snr:
             print(f'  {lab}: excluded (S/N = {snr:.1f})')
         else:
             keep.append(lab)
-    if 'H1_4861A' not in keep:
-        raise ValueError('H-beta is not usable; cannot measure E(B-V).')
-    return sorted(keep, key=lambda l: rest_wavelength(l, linelist_dict))
- 
- 
-def ebv_per_line(F, lines, R, law, linelist_dict=None):
-    """E(B-V) from each ratio F_j/F_Hb, per realization (DataFrame i x line)."""
-    k_hb = k_law(rest_wavelength('H1_4861A', linelist_dict), law)[0]
+
+    return sorted(keep, key=lambda line: rest_wavelength(line, linelist_dict))
+
+
+def ebv_per_line(file_table, lines, case_ratios, law, linelist_dict=None):
+    """
+    E(B-V) from each ratio F_j/F_Hb, per MC realization (DataFrame i x line)
+    F_j/F_Hb = 10**(-0.4*E(B-V)*deltaK)
+    E(B-V) = -1/0.4 *log10F_j/F_Hb)/ deltaK
+    """
+    # Get Hbeta information
+    wl_hb = rest_wavelength('H1_4861A', linelist_dict)
+    k_hb = k_law(wl_hb, law)[0]
     out = {}
     for lab in lines:
+        # Exclude H_beta
         if lab == 'H1_4861A':
             continue
-        dk = k_law(rest_wavelength(lab, linelist_dict), law)[0] - k_hb
-        with np.errstate(divide='ignore', invalid='ignore'):
-            obs = F[lab] / F['H1_4861A']
-            out[lab] = -2.5 / dk * np.log10(obs / R[lab])
+        wl_dk = rest_wavelength(lab, linelist_dict)
+        dk = k_law(wl_dk, law)[0] - k_hb
+
+        # Obs ratio
+        obs = file_table[lab] / file_table['H1_4861A']
+        out[lab] = (-1/0.4) / dk * np.log10(obs / case_ratios[lab])
     return pd.DataFrame(out)
- 
- 
+
+
 def ebv_combined(F, lines, R, law, linelist_dict=None):
     """Weighted fit of log10(F_j/R_j) = a - 0.4 E k_j over all lines, per
     realization. Weights from the MC scatter of each line."""
@@ -314,12 +321,12 @@ def ebv_combined(F, lines, R, law, linelist_dict=None):
         coef, *_ = np.linalg.lstsq(A * sw[:, None], y[ok] * sw, rcond=None)
         E[n] = coef[1]
     return pd.Series(E, index=F.index, name=f'E_BV_{law}')
- 
- 
+
+
 # ================================================================
 # Correct the saved fluxes
 # ================================================================
- 
+
 def correct_info(info, E_samples, law, linelist_dict=None, clip_negative=True):
     """Dereddened copy of the info table, realization by realization."""
     E = E_samples.clip(lower=0) if clip_negative else E_samples
