@@ -15,11 +15,11 @@ def get_line_groups():
     bright_lines = ['O2_3726A', 'O2_3729A', 'H1_6563A',
                     'H1_4861A', 'H1_4340A', 'O3_5007A',
                     'O3_4959A', 'N2_6548A', 'N2_6583A',
-                    'S2_6716A', 'S2_6731A']
+                    'S2_6716A', 'S2_6731A', 'He1_5016A']
 
     bright_lines_group = [('O2_3726A', 'O2_3729A'),
                           ('H1_4340A'), ('H1_4861A'),
-                          ('O3_4959A'), ('O3_5007A'),
+                          ('O3_4959A'), ('O3_5007A', 'He1_5016A'),
                           ('N2_6548A', 'H1_6563A', 'N2_6583A'),
                           ('S2_6716A', 'S2_6731A')]
     return bright_lines, bright_lines_group
@@ -74,7 +74,7 @@ def read_sigma(class_):
         sigma_broad = np.mean(old_fit['sigma_v_broad'])
         return sigma_narrow, sigma_broad
     else:
-        raise ('Path error: File not found')
+        raise FileNotFoundError(f'File not found: {path_old}')
 
 
 # Mask emission lines other than specific line
@@ -136,6 +136,10 @@ def get_stamp(class_, data, lines):
 # Model function
 # -----------------------------------------
 
+# Check if is a recombination line
+def is_recomb(label):
+    return label.startswith(('H1_', 'He1_', 'He2_'))
+
 
 # Model for a list of lines (could be just one)
 def model_flux_list(class_, stamp, linelist, deg=1,
@@ -158,19 +162,21 @@ def model_flux_list(class_, stamp, linelist, deg=1,
 
     pars = model.make_params()
 
-    pars.add('sigma_v_narrow', value=50, min=20, max=65, vary=True)
+    pars.add('sigma_v_narrow', value=50, min=20, max=80, vary=True)
 
-    pars.add('sigma_v_broad', value=80, min=65, max=120, vary=True)
+    pars.add('sigma_v_broad', value=80, min=65, max=300, vary=True)
 
     if ratio is None:
-        pars.add('broad_to_narrow_ratio', value=0.3, vary=True, min=0.0)
+        pars.add('ratio_H', value=0.4, min=0.0, max=5, vary=True)
+        pars.add('ratio_metal', value=0.4, min=0.0, max=5, vary=True)
     else:
-        pars.add('broad_to_narrow_ratio', value=ratio, vary=False)
+        pars.add('ratio_H', value=ratio[0], vary=False)
+        pars.add('ratio_metal', value=ratio[1], vary=False)
 
     for label in linelist:
 
         pars.add(f'z_{label}', value=z_init, vary=True,
-                 min=0, max=0.1)
+                 min=z_init*0.75, max=z_init*1.25)
 
         lam0 = linelist_dict[label]
 
@@ -182,8 +188,11 @@ def model_flux_list(class_, stamp, linelist, deg=1,
 
         pars.add(f'{label}_broad_center', value=lam0, vary=False,
                  expr=f'{lam0}*(1+z_{label})')
+
+        r = 'ratio_H' if is_recomb(label) else 'ratio_metal'
         pars.add(f'{label}_broad_amplitude', vary=False,
-                 expr=f'broad_to_narrow_ratio*{label}_narrow_amplitude')
+                 expr=f'{r}*{label}_narrow_amplitude')
+
         pars.add(f'{label}_broad_sigma', vary=False,
                  expr=f'(sigma_v_broad/3e5)*{label}_broad_center')
 
@@ -194,7 +203,7 @@ def model_flux_list(class_, stamp, linelist, deg=1,
                     nan_policy='omit', max_nfev=1000)
 
     if plot:
-        plotting_fit(stamp[0], stamp[1], out, linelist, class_)
+        plotting_fit(stamp[0], stamp[1], stamp[2], out, linelist, class_)
     return out
 
 
@@ -234,51 +243,112 @@ def create_dict(class_, stamps, linelist_all, n_mc=100,
 # -----------------------------------------
 
 
-def save_data_dict(class_, dict_, linelist):
+def _as_list(lines):
+    """('H1_4340A') is just a string, so wrap single lines in a list."""
+    if np.asarray(lines).size == 1:
+        return [lines] if isinstance(lines, str) else list(lines)
+    return list(lines)
 
-    # dataframe setup
-    columns = ['label', 'i', 'sigma_v_narrow', 'sigma_v_broad',
-               'b_to_n_ratio', 'nar_amplitude',
-               'bro_amplitude']
+
+def fits_to_rows(dict_, linelist):
+    """One row per (line, MC realization) with the fitted values."""
     rows = []
     for lines in linelist:
-        line_ = np.asarray(lines)
-        if line_.size == 1:
-            lines = [lines]
-
+        lines = _as_list(lines)
         fits = dict_[lines[0]]
         for line in lines:
+            ratio_name = 'ratio_H' if is_recomb(line) else 'ratio_metal'
             for i, fit in enumerate(fits):
                 p = fit.params
                 rows.append({
                     'label': line,
                     'i': i,
-                    'sigma_v_narrow':       p['sigma_v_narrow'].value,
-                    'sigma_v_narrow_err':   p['sigma_v_narrow'].stderr,
-                    'sigma_v_broad':        p['sigma_v_broad'].value,
-                    'sigma_v_broad_err':    p['sigma_v_broad'].stderr,
-                    'b_to_n_ratio':         p['broad_to_narrow_ratio'].value,
-                    'b_to_n_ratio_err':     p['broad_to_narrow_ratio'].stderr,
-                    'nar_amplitude':     p[f'{line}_narrow_amplitude'].value,
-                    'bro_amplitude':      p[f'{line}_broad_amplitude'].value,
+                    'sigma_v_narrow': p['sigma_v_narrow'].value,
+                    'sigma_v_broad':  p['sigma_v_broad'].value,
+                    'ratio_type':     ratio_name,
+                    'b_to_n_ratio':   p[ratio_name].value,
+                    'nar_amplitude':  p[f'{line}_narrow_amplitude'].value,
+                    'bro_amplitude':  p[f'{line}_broad_amplitude'].value,
                 })
-    info = pd.DataFrame(rows, columns=columns)
+    return rows
 
-    res = info[(info['b_to_n_ratio'] > 0) & (info['b_to_n_ratio'] <= 1)].copy()
-    res['flux'] = res['nar_amplitude'] + res['bro_amplitude']
 
-    cols = columns[2:]+['flux']
+def add_derived(info):
+    """Peak-height ratio, broad fraction and a flag for bad ratios."""
+    info = info.copy()
+    info['flux'] = info['nar_amplitude'] + info['bro_amplitude']
+    info['peak_ratio'] = (info['b_to_n_ratio']
+                          * info['sigma_v_narrow'] / info['sigma_v_broad'])
+    info['broad_frac'] = info['bro_amplitude'] / info['flux']
+    # ratio collapsed to ~0 or broad peak as tall as narrow: not a measurement
+    info['ratio_on_bound'] = ((info['b_to_n_ratio'] < 1e-3) |
+                              (info['peak_ratio'] >= 0.99))
+    return info
+
+
+def summarize(info):
+    """Median of the good MC fits per line
+      plus a 16-84 percentile flux error."""
+    res = add_derived(info)
+    # drop only failed fits; keep ratios on a bound, their flux is still valid
+    res = res[np.isfinite(res['nar_amplitude']) & (res['nar_amplitude'] > 0)]
+
+    cols = ['sigma_v_narrow', 'sigma_v_broad', 'b_to_n_ratio',
+            'peak_ratio', 'broad_frac',
+            'nar_amplitude', 'bro_amplitude', 'flux']
 
     g = res.groupby('label')
-
     summary = g[cols].median()
     q = g['flux'].quantile([0.16, 0.84]).unstack()
     summary['fluxerr'] = (q[0.84] - q[0.16]) / 2
     summary['n_fits'] = g.size()
+    summary['frac_on_bound'] = g['ratio_on_bound'].mean()
+    return summary
 
+
+def get_fixed_ratios(info):
+    """Median ratio_H (H I lines) and ratio_metal from fits not on a bound."""
+    d = add_derived(info)
+    ok = (~d['ratio_on_bound']) & (d['nar_amplitude'] > 0)
+
+    H = d['label'].str.startswith('H1_')
+    metal = d['ratio_type'] == 'ratio_metal'
+
+    med_H = d.loc[ok & H, 'b_to_n_ratio'].median()
+    med_metal = d.loc[ok & metal, 'b_to_n_ratio'].median()
+    print(f'ratio_H = {med_H:.3f} (from {(ok & H).sum()} fits), '
+          f'ratio_metal = {med_metal:.3f} (from {(ok & metal).sum()} fits)')
+    return med_H, med_metal
+
+
+def _paths(class_):
     gal_id = class_.names[0][:5]
-    info.to_csv(f'{proj_DIR}new_results/{gal_id}/{gal_id}_lines_info.csv')
-    summary.to_csv(f'{proj_DIR}new_results/{gal_id}/{gal_id}_lines_summ.csv')
+    out_dir = f'{proj_DIR}new_results/{gal_id}'
+    os.makedirs(out_dir, exist_ok=True)
+    return (f'{out_dir}/{gal_id}_lines_info.csv',
+            f'{out_dir}/{gal_id}_lines_summ.csv')
+
+
+def save_tables(class_, info, summary):
+    info_path, summ_path = _paths(class_)
+    info.to_csv(info_path, index=False)
+    summary.to_csv(summ_path)          # keeps 'label' as the index
+
+
+def load_tables(class_):
+    info_path, summ_path = _paths(class_)
+    info = pd.read_csv(info_path)
+    # older files were saved with the index as an extra column
+    info = info.drop(columns=[c for c in info.columns
+                              if c.startswith('Unnamed')])
+    summary = pd.read_csv(summ_path, index_col='label')
+    return info, summary
+
+
+def save_data_dict(class_, dict_, linelist):
+    info = pd.DataFrame(fits_to_rows(dict_, linelist))
+    summary = summarize(info)
+    save_tables(class_, info, summary)
     return info, summary
 
 # -----------------------------------------
@@ -300,12 +370,66 @@ def measure_all_lines(class_, linelist_all, linelist_group, n_mc=100, deg=1,
     print('Done')
     return info, summary
 
+
+def measure_other_lines(class_, other_lines=None, n_mc=100, deg=1,
+                        plot=False):
+
+    info, _ = load_tables(class_)
+    ratio = get_fixed_ratios(info)
+
+    done = set(info['label'])
+    if other_lines is None:
+        other_lines = list(class_.linelist_dict)
+    other_lines = [label for label in other_lines if label not in done]
+
+    data = read_data(class_)
+    wave = data[0]
+    cte = 1 + class_.redshift
+    lines = [label for label in other_lines
+             if np.nanmin(wave) < class_.linelist_dict[label] * cte
+             < np.nanmax(wave)]
+    skipped = sorted(set(other_lines) - set(lines))
+    if skipped:
+        print(f'Outside the spectrum, skipped: {skipped}')
+    if not lines:
+        print('No new lines to fit')
+        return info, summarize(info)
+
+    masked = mask_nonuse_emission_line(class_, lines, data)
+    print(f'MC fitting {len(lines)} lines together, ratio fixed')
+    fits = MC_model_from_lines(class_, {lines[0]: masked}, lines,
+                               n_mc=n_mc, deg=deg, ratio=ratio, plot=plot)
+
+    new_info = pd.DataFrame(fits_to_rows({lines[0]: fits}, [lines]))
+    info = pd.concat([info, new_info], ignore_index=True)
+
+    summary = summarize(info)
+    save_tables(class_, info, summary)
+    print('Done')
+    return info, summary
+
+
+def measure_everything(class_, n_mc=100, plot=False):
+
+    bright_lines, bright_groups = get_line_groups()
+    _ = fit_quality_table(class_, bright_lines, bright_groups, plot=False)
+
+    print('--- Step 1: bright lines (free ratio) ---')
+    measure_all_lines(class_, bright_lines, bright_groups,
+                      n_mc=n_mc, deg=1, ratio=None, plot=plot)
+
+    print('--- Step 2: other lines (fixed ratio) ---')
+    info, summary = measure_other_lines(class_,
+                                        other_lines=class_.line_name.values,
+                                        n_mc=n_mc, deg=5, plot=plot)
+    return info, summary
+
 # -----------------------------------------
 # Plotting functions
 # -----------------------------------------
 
 
-def plotting_fit(lams, flux, fit, linelist, class_):
+def plotting_fit(lams, flux, err, fit, linelist, class_):
     fig2, (ax, ax_res) = plt.subplots(
         2, 1, figsize=(8, 8),
         sharex=True,
@@ -352,9 +476,13 @@ def plotting_fit(lams, flux, fit, linelist, class_):
                 lw=1,
                 drawstyle='steps-mid')
 
+    ax_res.fill_between(lams, -3*err, 3*err,
+                        color='grey',
+                        alpha=0.2, step='mid')
+
     ax_res.axhline(0, color='grey', linestyle='--', lw=1)
 
-    ax_res.set_ylabel('Residuals', size=16)
+    ax_res.set_ylabel(r'Residuals', size=16)
     ax_res.set_xlabel(r'Obs. Wavelength ($\AA$)', size=20)
     # ax_res.set_ylim(-40, 40)
 
@@ -370,8 +498,8 @@ def plotting_fit(lams, flux, fit, linelist, class_):
                 color='k', size=8, transform=ax.get_xaxis_transform())
 
     # --- Formatting ---
-    str = r'Flux ($10^{-17}\ \mathrm{erg\,s^{-1}\,cm^{-2}\,\AA^{-1}}$)'
-    ax.set_ylabel(str, size=20)
+    ylabel = r'Flux ($10^{-17}\ \mathrm{erg\,s^{-1}\,cm^{-2}\,\AA^{-1}}$)'
+    ax.set_ylabel(ylabel, size=20)
 
     ax.legend(fontsize=14, frameon=True)
     ax_res.tick_params(
@@ -390,3 +518,80 @@ def plotting_fit(lams, flux, fit, linelist, class_):
     )
     plt.show()
     return fig2
+
+
+# -----------------------------------------
+# Checking uncertainties
+# -----------------------------------------
+
+
+def fit_quality(class_, out, stamp, linelist, edge_frac=0.15):
+    """Per-line check: data vs model integrated over each line's window."""
+    wave, flux, err = stamp
+    best_fit = out.eval(x=wave)
+    comps = out.eval_components(x=wave)
+    dlam = np.gradient(wave)
+    p = out.params
+
+    # continuum from the outer edges of the stamp
+    n = len(wave)
+    k = max(3, int(edge_frac * n))
+    side = np.zeros(n, bool)
+    side[:k] = side[-k:] = True
+    ok = side & np.isfinite(flux)
+    cont = np.polyval(np.polyfit(wave[ok], flux[ok], 1), wave)
+
+    # all fitted line emission (no polynomial)
+    lines_model = np.sum([comps[f'{l}_narrow_'] + comps[f'{l}_broad_']
+                          for l in linelist], axis=0)
+
+    # goodness of fit for the whole group
+    good = np.isfinite(flux) & (err > 0)
+    resid = (flux - best_fit)[good] / err[good]
+    redchi = np.sum(resid**2) / (good.sum() - out.nvarys)
+    max_res = np.max(np.abs(resid))
+
+    # windows: split at midpoints between observed line centers
+    centers = {l: class_.linelist_dict[l] * (1 + p[f'z_{l}'].value)
+               for l in linelist}
+    ordered = sorted(linelist, key=centers.get)
+    mids = [0.5 * (centers[a] + centers[b])
+            for a, b in zip(ordered[:-1], ordered[1:])]
+    bounds = [-np.inf] + mids + [np.inf]
+
+    rows = []
+    for l, lo, hi in zip(ordered, bounds[:-1], bounds[1:]):
+        win = ~side & (wave >= lo) & (wave < hi)
+        direct = np.nansum(((flux - cont) * dlam)[win])
+        model_win = np.nansum((lines_model * dlam)[win])
+        rows.append({
+            'line': l,
+            'fitted_flux': (p[f'{l}_narrow_amplitude'].value
+                            + p[f'{l}_broad_amplitude'].value),
+            'direct_over_model': direct / model_win,
+            'redchi': redchi,
+            'max_abs_resid_sigma': max_res,
+        })
+    return rows
+
+
+def fit_quality_table(class_, linelist_all, linelist_group, deg=1, plot=True):
+    data = read_data(class_)
+    masked = mask_nonuse_emission_line(class_, linelist_all, data)
+    stamps = get_stamp(class_, masked, linelist_all)
+
+    rows = []
+    for group in linelist_group:
+        group = _as_list(group)
+        stamp = stamps[group[0]]
+        out = model_flux_list(class_, stamp, group, deg=deg)
+        stats = fit_quality(class_, out, stamp, group)
+        rows.extend(stats)
+        if plot:
+            plotting_fit(stamp[0], stamp[1], stamp[2], out, group, class_)
+
+    df = pd.DataFrame(rows)
+    gal_id = class_.names[0][:5]
+    df.to_csv(f'{proj_DIR}new_results/{gal_id}/{gal_id}_fit_quality.csv',
+              index=False)
+    return df
