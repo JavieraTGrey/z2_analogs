@@ -1,9 +1,14 @@
-import glob, os
+import glob
+import os
 import numpy as np
 import pandas as pd
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 from FINAL_LINES import add_derived
 from GALAXIES import PROJ_DIR
+
+mpl.rcParams["text.usetex"] = True
+plt.rcParams["font.family"] = "serif"
 
 C_H, C_M = '#2a6fdb', '#e07b00'
 LABEL = {'ratio_H': 'H I', 'ratio_metal': 'metals'}
