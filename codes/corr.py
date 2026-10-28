@@ -90,6 +90,9 @@ class REDSHIFT:
         self.spectra.lines_waves = self.spectra.line_list['vacuum_wave']*cte
 
         self.zs = []
+        gal = self.spectra.gal_id
+        z_path = f'{proj_DIR}redshift/{gal}_redshift.csv'
+        have_file = os.path.exists(z_path)
         for i in self.spectra.FILES:
             path = self.spectra.DIR + i
             hdu = fits.open(path)
@@ -103,14 +106,21 @@ class REDSHIFT:
             data.append(i.partition("/")[0])  # name of the folder
             self.spectra.datas.append(data)
 
-            self.reset_redshift(data)
+            if not have_file:
+                self.reset_redshift(data)
 
-        cte = (1 + self.spectra.redshift)
-        self.spectra.lines_waves = self.spectra.line_list['vacuum_wave']*cte
+        if have_file:
+            d = pd.read_csv(z_path)
+            self.redshifts = [d['z'].values[0]]
+            print(f'{gal}: read z from {z_path}')
+        else:
+            self.save_redshift(z_path)
 
+        # set the new redshift and the observed line positions
         self.spectra.redshift = self.redshifts[0]
-        print(f'New redshift for {self.spectra.names[0]},'
-              f'z = {self.spectra.redshift}')
+        cte = (1 + self.spectra.redshift)
+        self.spectra.lines_waves = self.spectra.line_list['vacuum_wave'] * cte
+        print(f'New redshift for {gal}, z = {self.spectra.redshift}')
 
     @log_method_call
     def reset_redshift(self, data):
@@ -138,7 +148,7 @@ class REDSHIFT:
         if zs:  # Ensure zs is not empty before calculating median
             self.spectra.redshift = np.median(zs)
 
-        lines = ['H1_4861A', "O3_4959A", 'O3_5007A', 'N2_6548A', 'N2_6583A']
+        lines = ['H1_4861A', "O3_4959A", 'O3_5007A', 'N2_6583A']
 
         # Get gaussian on both lines
         cte = (1 + self.spectra.redshift)
@@ -146,6 +156,7 @@ class REDSHIFT:
         wave_obs = np.array([])
 
         # Mask unused emission lines
+        self.comps = []
 
         for label in lines:
             masked_flux = flux.copy()
@@ -161,7 +172,6 @@ class REDSHIFT:
                     # Every line to nan
                     masked_flux[mask_line] = np.nan
 
-            self.comps = []
             # Get manual stamp on the emission lines
             center = self.spectra.linelist_dict[label] * cte
             sep = 7 if label in ['N2_6548A', 'N2_6583A'] else 15
@@ -173,7 +183,7 @@ class REDSHIFT:
             wave_stamp = w[mask_stamp]
             sigma_stamp = sigma[mask_stamp]
 
-            # Gaussian model for balmer abs
+            # Gaussian model for emission line
             gaussian = GaussianModel(prefix=label+'_')
 
             # Create a polynomial model for the continuum
@@ -223,12 +233,13 @@ class REDSHIFT:
                 yoff = stamp + np.random.randn(len(stamp)) * sigma_stamp
                 out_comp_mult = comp_mult.fit(yoff, pars_mult,
                                               x=wave_stamp,
+                                              weights= 1 / sigma_stamp,
                                               nan_policy='omit',
                                               max_nfev=1000)
 
                 self.comps.append(out_comp_mult)
                 wave_obs = np.append(wave_obs,
-                                     out_comp_mult.params[f'{label}_center'])
+                                     out_comp_mult.params[f'{label}_center'].value)
             # plt.figure(figsize=(8, 5))
             # plt.errorbar(wave_stamp, stamp, yerr=sigma_stamp, fmt='o',
             #              color='blue', ms=2, alpha=0.5, label="Observed")
@@ -259,7 +270,7 @@ class REDSHIFT:
 
         # Trace plot
         axs[0].plot(self.z_chain, alpha=0.5, lw=0.5)
-        for i, label in zip([999, 1999, 2999, 3999, 4999, 5999], lines):
+        for i, label in zip([999, 1999, 2999, 3999, 4999], lines):
             axs[0].axvline(i, color="red", ls="--")
             axs[0].text(i - 900, np.max(self.z_chain), label)
         axs[0].set_xlabel("Iteration")
@@ -283,6 +294,23 @@ class REDSHIFT:
 
         print(f'New redshift calculated for {name},'
               f'z = {np.median(self.z_chain)}')
+
+    def save_redshift(self, z_path):
+        gal = self.spectra.gal_id
+        z16, z50, z84 = np.percentile(self.z_chain, [16, 50, 84])
+
+        row = {
+            'gal_id': gal,
+            'z': z50,
+            'z_err_up': z84 - z50,
+            'z_err_low': z50 - z16,
+        }
+
+        os.makedirs(os.path.dirname(z_path), exist_ok=True)
+        pd.DataFrame([row]).to_csv(z_path, index=False)
+        print(f'z = {z50:.6f} +{z84 - z50:.6f} -{z50 - z16:.6f}  ->  {z_path}')
+        # keep self.redshifts consistent with what was saved
+        self.redshifts = [z50]
 
 
 # class MW_DUST_CORR:
