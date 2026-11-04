@@ -67,7 +67,7 @@ def read_data(class_):
 
 
 def first_sigma_est(class_, data, plot=False):
-\
+
     wave, flux, sigma = data
 
     fit = fitSpectrum(wave, flux, sigma,
@@ -792,7 +792,7 @@ def run_balmer_series_pipeline(class_, n_mc=1000, base_dir=None, plot=True,
                                vel_grid=None, rest_window=(3730., 4160.),
                                hgamma_own=True,
                                subtract_kinds=('balmer', 'metal', 'cn'),
-                               min_snr=3.0):
+                               min_snr=3.0, hgamma_in_ew=True):
 
     import balmer_series as bs
 
@@ -851,10 +851,19 @@ def run_balmer_series_pipeline(class_, n_mc=1000, base_dir=None, plot=True,
         if plot:
             bs.plot_series(res_hg, class_, save_path=plot_dir,
                            name='hgamma_fit')
-        ew_draws['H1_4340A'] = res_hg['ew_draws']['H1_4340A']
+        if hgamma_in_ew:
+            ew_draws['H1_4340A'] = res_hg['ew_draws']['H1_4340A']
+        if not hgamma_own:
+            hg_kinds = []
+            for kind in subtract_kinds:
+                if kind != 'balmer':
+                    hg_kinds.append(kind)
+            corrected_flux = corrected_flux - bs.series_absorption(
+                res_hg, wave, kinds=tuple(hg_kinds), min_snr=min_snr)
 
     # 2-3. EW(Hb) from the series -> Hb, Ha (and Hg, unless it is
     # corrected with its own local fit)
+
     own_hg = use_hgamma and hgamma_own and res_hg is not None
     if own_hg:
         ratio_lines = ('H1_4861A', 'H1_6563A')
@@ -885,13 +894,7 @@ def run_balmer_series_pipeline(class_, n_mc=1000, base_dir=None, plot=True,
             'lines_used': 'own local fit'}
         print(f"  H1_4340A: corrected with its own fit, EW = "
               f"{np.median(ew_hg):.2f} +- {np.std(ew_hg):.2f} A")
-    elif res_hg is not None:
-        hg_kinds = []
-        for kind in subtract_kinds:
-            if kind != 'balmer':
-                hg_kinds.append(kind)
-        corrected_flux = corrected_flux - bs.series_absorption(
-            res_hg, wave, kinds=tuple(hg_kinds), min_snr=min_snr)
+
     if plot:
         used = []
         for _, row in ew_table.iterrows():
