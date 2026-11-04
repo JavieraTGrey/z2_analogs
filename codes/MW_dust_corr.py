@@ -135,3 +135,39 @@ def run(class_, ext_path=None, calib_frac=0.10, Rv=3.1,
         ax2.set_ylabel('C = F$_{corr}$ / F$_{obs}$')
         fig.savefig(f'{folder}/MWcorr_{gal}.png', dpi=130, bbox_inches='tight')
     return t, E_mw, sigma_E
+
+def add_mw_uncertainty(info, linelist_dict, z, E_mw, sigma_E, Rv=3.1,
+                       seed=None):
+    rng = np.random.default_rng(seed)
+    out = info.copy()
+    draws = {}
+    for i in out['i'].unique():
+        draws[i] = rng.normal(E_mw, sigma_E)
+
+    factors = []
+    E_used = []
+    for _, row in out.iterrows():
+        lam_obs = linelist_dict[row['label']] * (1 + z)
+        dE = draws[row['i']] - E_mw
+        factors.append(10**(0.4 * dE * k_ccm(lam_obs, Rv)[0]))
+        E_used.append(draws[row['i']])
+    out['mw_factor'] = factors
+    out['E_MW'] = E_used
+    out['nar_amplitude'] = out['nar_amplitude'] * out['mw_factor']
+    out['bro_amplitude'] = out['bro_amplitude'] * out['mw_factor']
+    return out
+
+
+def add_mw_and_save(class_, proj_DIR, tag_in='', tag_out='_mw', seed=None):
+    gal = class_.gal_id
+    side = pd.read_csv(f'{proj_DIR}new_results/MW_dust/{gal}/dcorr_{gal}_mw.csv', nrows=1)
+    E_mw = float(side['E_MW'].iloc[0])
+    sigma_E = float(side['sigma_E'].iloc[0])
+    folder = f'{proj_DIR}new_results/{gal}'
+    info = pd.read_csv(f'{folder}/{gal}_lines_info{tag_in}.csv')
+    out = add_mw_uncertainty(info, class_.linelist_dict, class_.redshift,
+                             E_mw, sigma_E, seed=seed)
+    out.to_csv(f'{folder}/{gal}_lines_info{tag_out}.csv', index=False)
+    print(f'Saved {gal}_lines_info{tag_out}.csv '
+          f'(E_MW = {E_mw:.4f} +- {sigma_E:.4f} drawn per realization)')
+    return out
