@@ -1,0 +1,1178 @@
+# Equivalent width calculation and plotting functions
+
+
+# ================================================================
+# IMPORTS & CONFIG
+# ================================================================
+
+import astropy.constants as const
+import numpy as np
+import matplotlib.pyplot as plt
+from lmfit import Parameter
+from lmfit.models import GaussianModel, PolynomialModel
+import os
+import pandas as pd
+import h5py
+from GaussianFitting import fitSpectrum
+from dust_correction import E_BV_, get_flux, f_int
+
+proj_DIR = '/Users/javieratoro/Desktop/thesis/proyecto 2024-2/'
+EW_all_ratios = {
+    'H1_6563A': 0.930,
+    'H1_4861A': 1.0,
+    'H1_4340A': 0.964,
+    'H1_4102A': 0.927,
+    'H1_3889A': 0.893,
+    'H1_3835A': 0.868,
+    'H1_3798A': 0.824,
+    'H1_3771A': 0.778,
+    'H1_3750A': 0.750}
+
+
+# ================================================================
+# Absorption profile models
+# ================================================================
+def neg_gauss(class_, line, w, A):
+    w_center = class_.linelist_dict[line]
+    z = class_.redshift
+    mu = w_center * (1 + z)
+    sigma = w_center * (1 + z) * 550 / 3e5
+    return -A * np.exp(-((mu - w) ** 2) / (2 * sigma**2))
+
+
+def absorption_func(class_, line, w, A, m, n):
+    return neg_gauss(class_, line, w, A) + m * w + n
+
+
+def neg_gauss_EW_single(class_, line, w, A_triplet, EW_, vel=550):
+    w_center = class_.linelist_dict[line]
+    z = class_.redshift
+    mu = w_center * (1 + z)
+    sigma = w_center * (1 + z) * vel / 3e5
+    _, m, n = A_triplet
+    continuum_at_mu = m * mu + n
+    A = (EW_ * (1 + z) * continuum_at_mu) / (np.sqrt(2 * np.pi) * sigma)
+    return -A * np.exp(-((mu - w) ** 2) / (2 * sigma**2))
+
+
+# ================================================================
+# Data preparation
+# ================================================================
+
+# Read data for galaxies
+def read_data(class_):
+    """
+    Reads MW dust corrected data if it exists, otherwise reads the
+    uncorrected data.
+    """
+    gal_id = class_.names[0][:5]
+    print(f'Reading data for {gal_id}')
+    file_path = f'{proj_DIR}dust/{gal_id}/dcorr_{gal_id}.csv'
+    if os.path.exists(file_path):
+        print("Using MW dust corrected data")
+        dcorr = pd.read_csv(file_path)
+        arrays = dcorr.to_numpy().T
+        wave, flux, sigma = arrays
+
+    else:
+        print("Using uncorrected data")
+        wave, flux, sigma, _ = class_.datas[0]
+    return wave, flux, sigma
+
+
+# Sigma estimation for line masking
+def first_sigma_est(class_, data, plot=False):
+    """
+    Get the velocity dispersion (sigma) of the narrow and/or broad
+    Gaussian components from the spectral fitting.
+
+    Add plot=True to visualize the spectral fitting model
+    """
+    wave, flux, sigma = data
+
+    fit = fitSpectrum(wave, flux, sigma,
+                      linelist=class_.linelist_dict,
+                      z_init=class_.redshift,
+                      weights=1 / sigma**2,
+                      showPlot=plot,
+                      broad=True, nfev=1000)
+
+    sigma_narrow = fit.params['sigma_v_narrow']
+    sigma_broad = fit.params['sigma_v_broad']
+
+    return sigma_narrow, sigma_broad
+
+
+def get_stamps(class_, data, lines):
+    wave, flux, err = data[0], data[1], data[2]
+    lines_df = class_.line_list
+    cte = (1 + class_.redshift)
+    stamps = []
+    for bright_line in lines:
+        stamp = flux.copy()
+        for line_label in lines:
+            if bright_line == line_label:
+                continue
+            if line_label == 'He1_5016A':
+                continue
+            info = lines_df[lines_df['name'] == line_label]
+            w3, w4 = info[['w3', 'w4']].values[0]
+
+            mask_line = (wave > w3*cte) & (wave < w4*cte)
+            stamp[mask_line] = np.nan
+        info_bright = lines_df[lines_df['name'] == bright_line]
+        w1, w6 = info_bright[['w1', 'w6']].values[0]
+        mask_stamp = (wave > w1*cte) & (wave < w6*cte)
+        stamps.append((wave[mask_stamp], stamp[mask_stamp], err[mask_stamp]))
+    return stamps, mask_stamp
+
+
+# Get sigma for either narrow or borad component
+def get_sigma(line, class_, sigmas):
+    sigma_narr, sigma_broad = sigmas
+    bright_lines = ['O2_3726A', 'O2_3729A', 'H1_6563A', 'H1_4861A', 'H1_4340A',
+                    'O3_5007A', 'O3_4959A', 'N2_6548A', 'N2_6583A', 'S2_6716A',
+                    'S2_6731A']
+    center = class_.linelist_dict[line] * (1 + class_.redshift)
+    if line in bright_lines:
+        sigma = (center / const.c.to('km/s').value) * sigma_broad.value
+    else:
+        sigma = (center / const.c.to('km/s').value) * sigma_narr.value
+    return sigma
+
+
+# Mask emission lines other than Hidriogen lines
+def mask_nonuse_emission_line(class_, sigmas, line, data):
+    """
+    Mask every emission line other than `line`, 2.5 sigma around its
+    center, setting flux to NaN and sigma to 0 in that window.
+
+    Parameters:
+    - class_: The spectral data class.
+    - sigmas: A tuple containing the velocity dispersions (sigma) for
+                narrow and broad components.
+    - line: The emission line to keep (e.g., 'H_alpha').
+    - data: A tuple containing the wavelength, flux, and sigma arrays.
+
+    Returns:
+    - masked_wave, masked_flux, masked_sigma
+    """
+    wave, flux, err = data
+
+    cte = (1 + class_.redshift)
+    masked_flux = flux.copy()
+    masked_sigma = err.copy()
+
+    for label in class_.linelist_dict:
+        if label == line:
+            continue
+        center = class_.linelist_dict[label] * cte
+        sigma = get_sigma(label, class_, sigmas)
+
+        size = 4
+        mask_line = (wave > center - size * sigma) & \
+                    (wave < center + size * sigma)
+
+        masked_flux[mask_line] = np.nan
+        masked_sigma[mask_line] = 0.0
+
+    return wave, masked_flux, masked_sigma
+
+
+# Isolate hidrogen line that we are studying
+def isolate_emission_line(class_, line, datas):
+    wave, flux, sigma = datas
+
+    line_center = class_.linelist_dict[line] * (1 + class_.redshift)
+    if line in ['H1_4340A', 'H1_4102A', 'H1_3970A', 'H1_3889A',
+                'H1_6563A', 'H1_4861A']:
+        lower_bound = line_center - 50
+        upper_bound = line_center + 50
+    elif line == 'H1_3835A':
+        lower_bound = line_center - 35
+        upper_bound = line_center + 35
+    else:
+        lower_bound = line_center - 20
+        upper_bound = line_center + 20
+
+    mask = (wave >= lower_bound) & (wave <= upper_bound)
+
+    return wave[mask], flux[mask], sigma[mask]
+
+
+# --------------------------------------------------------
+#  FITTING — single fits and Monte Carlo
+# --------------------------------------------------------
+
+# Model single absorption feature
+def model_single_abs(class_, label, datas, sigmas, vel=550):
+    wave, flux_, err = datas
+
+    lam = class_.linelist_dict[label]
+    center = lam * (1 + class_.redshift)
+    sigma = get_sigma(label, class_, sigmas)
+
+    size = 3
+    mask_line = (wave > center - size * sigma) & (wave < center + size * sigma)
+
+    flux = flux_.copy()
+    flux[mask_line] = np.nan
+
+    gaussian = GaussianModel(prefix=label + '_')
+
+    polydeg = 1
+    polynomial = PolynomialModel(degree=polydeg)
+
+    comp_mult = gaussian + polynomial
+    pars_mult = comp_mult.make_params()
+
+    pars_mult.add(name='z', value=class_.redshift, vary=False)
+    pars_mult.add(name='sigma_v', value=vel, vary=False)
+
+    for param in ['center', 'amplitude', 'sigma']:
+        narrow_key = f'{label}_{param}'
+        if param == 'center':
+            value, vary_, min_, max_ = lam, False, None, None
+            expr = f'{lam:6.2f}*(1+z)'
+        elif param == 'amplitude':
+            value, vary_, min_, max_ = -30, True, -100, 0
+            expr = None
+        else:  # sigma
+            value, vary_, min_, max_ = None, False, None, None
+            expr = f'(sigma_v/3e5)*{label}_center'
+        pars_mult[narrow_key] = Parameter(name=narrow_key, value=value,
+                                          vary=vary_, expr=expr,
+                                          min=min_, max=max_)
+    for i in range(polydeg + 1):
+        pars_mult[f'c{i:1.0f}'].set(value=0)
+
+    out_comp_mult = comp_mult.fit(flux, pars_mult,
+                                  x=wave, weights=1 / err**2,
+                                  nan_policy='omit',
+                                  max_nfev=1000)
+
+    return out_comp_mult
+
+
+# Monte Carlo modeling of single H line
+def model_mc_abs(class_, label, isolated_data, sigmas, vel=550, n_mc=100):
+    wave, flux, sigma = isolated_data
+    fit_mc, comps = [], []
+    As = []
+    for i in range(n_mc):
+        yoff = flux + np.random.randn(len(flux)) * sigma
+        fit = model_single_abs(class_, label, (wave, yoff, sigma), sigmas, vel=vel)
+        fit_mc.append(fit)
+        comps.append(fit.eval_components(x=wave))
+        param_key = f"{label}_height"
+        height = -1 * fit.params[param_key].value
+        m = fit.params['c1'].value
+        n = fit.params['c0'].value
+        As.append((height, m, n))
+    return fit_mc, comps, As
+
+
+# Model flux for lines in list
+def model_flux_list(class_, stamp, linelist, sigmas,
+                    ratio=None, plot=False):
+    z_init = class_.redshift
+    linelist_dict = class_.linelist_dict
+
+    narrow_gaussians = [
+        GaussianModel(prefix=f'{label}_narrow_') for label in linelist]
+    broad_gaussians = [
+        GaussianModel(prefix=f'{label}_broad_') for label in linelist]
+
+    polydeg = 0
+    polynomial = PolynomialModel(degree=polydeg)
+
+    model = narrow_gaussians[0] + broad_gaussians[0]
+    for n, b in zip(narrow_gaussians[1:], broad_gaussians[1:]):
+        model += n + b
+    model += polynomial
+
+    pars = model.make_params()
+
+    pars.add('z', value=z_init, vary=True,
+             min=z_init - 1e-2, max=z_init + 1e-2)
+
+    sigma_v_narrow, sigma_v_broad = sigmas
+
+    if sigma_v_narrow.value is None:
+        pars.add('sigma_v_narrow', value=50, min=20, max=65, vary=True)
+    else:
+        pars.add('sigma_v_narrow', value=sigma_v_narrow.value, vary=False)
+
+    if sigma_v_broad.value is None:
+        pars.add('sigma_v_broad', value=80, min=65, max=100, vary=True)
+    else:
+        pars.add('sigma_v_broad', value=sigma_v_broad.value, vary=False)
+
+    if ratio is None:
+        pars.add('broad_to_narrow_ratio', value=0.3, vary=True, min=0.0)
+    else:
+        pars.add('broad_to_narrow_ratio', value=ratio, vary=False)
+
+    for label in linelist:
+        lam0 = linelist_dict[label]
+
+        pars.add(f'{label}_narrow_center', value=lam0, vary=False,
+                 expr=f'{lam0}*(1+z)')
+        pars.add(f'{label}_narrow_amplitude', value=50, vary=True, min=0.0)
+        pars.add(f'{label}_narrow_sigma', vary=False,
+                 expr=f'(sigma_v_narrow/3e5)*{label}_narrow_center')
+
+        pars.add(f'{label}_broad_center', value=lam0, vary=False,
+                 expr=f'{lam0}*(1+z)')
+        pars.add(f'{label}_broad_amplitude', vary=False,
+                 expr=f'broad_to_narrow_ratio*{label}_narrow_amplitude')
+        pars.add(f'{label}_broad_sigma', vary=False,
+                 expr=f'(sigma_v_broad/3e5)*{label}_broad_center')
+
+    for i in range(polydeg + 1):
+        pars[f'c{i}'].set(value=1.0, vary=True)
+
+    out = model.fit(stamp[1], pars, x=stamp[0],
+                    nan_policy='omit', max_nfev=1000)
+
+    if plot:
+        plotting_fit(stamp[0], stamp[1], out, linelist, class_)
+    return out
+
+
+# ================================================================
+# EW DERIVATION
+# ================================================================
+
+# Get EW from the MC params for a single H line
+def get_EW_from_mc(class_, label, As, vel=550):
+
+    w_center = class_.linelist_dict[label]
+    z = class_.redshift
+    mu = w_center * (1 + z)
+    sigma = w_center * (1 + z) * vel / 3e5
+
+    As = np.array(As)
+    height, m, n = As[:, 0], As[:, 1], As[:, 2]
+
+    continuum_at_mu = m * mu + n
+    EW = (height * np.sqrt(2 * np.pi * sigma**2)
+          / continuum_at_mu
+          / (1 + z))
+
+    return EW
+
+
+# Model all lines from a list and correct data
+def model_from_list_lines(class_, data, sigmas,
+                          lines, vel=550, n_mc=1000, min_amp_sigma=3.0):
+
+    fits, fits_eval_stamp, stamps, params = {}, {}, {}, {}
+    corrected_flux = data[1].copy()
+    corr_stamps, EW_lines, EW_hb_samples, EW_hb_weights = {}, {}, [], []
+    line_significance = {}
+    corrected_all_flux = []
+
+    for line in lines:
+        masked_data = mask_nonuse_emission_line(
+            class_, sigmas, line, [data[0], corrected_flux, data[2]])
+        isolated_data = isolate_emission_line(
+            class_, line, datas=masked_data)
+        stamps[line] = isolated_data
+
+        fit_mc, comps, param = model_mc_abs(class_, line, isolated_data,
+                                            sigmas, vel=vel, n_mc=n_mc)
+        param = np.asarray(param)
+        params[line] = param
+        fits[line] = fit_mc
+        fits_eval_stamp[line] = comps
+
+        absorption = neg_gauss(class_, line, data[0],
+                               np.mean(param, axis=0)[0])
+        corrected_flux -= absorption
+
+        corr_stamps[line] = [isolated_data[0],
+                             isolated_data[1] - comps[0][f'{line}_'],
+                             isolated_data[2]]
+
+        if line == 'H1_3970A':
+            continue
+
+        EW_line = get_EW_from_mc(class_, line, param, vel=vel)
+        EW_lines[line] = EW_line
+
+        EW_hb_line = EW_line / EW_all_ratios[line]
+        EW_hb_samples.append(EW_hb_line)
+
+        # --- per-draw weight (amplitude vs local continuum noise) ---
+        amplitude = param[:, 0]
+        noise_level = np.median(isolated_data[2])
+        significance = np.abs(amplitude) / noise_level
+        weight_draw = np.clip(significance / min_amp_sigma, 0, 1)
+        weight_draw = np.where(amplitude > 0, weight_draw, 0.0)
+
+        # line-level weight (is the fit consistent with zero overall?) ---
+        mean_amplitude = np.mean(amplitude)
+        amplitude_std = np.std(amplitude)
+        amplitude_std_safe = amplitude_std if amplitude_std > 0 else np.inf
+        sig_line = np.abs(mean_amplitude) / amplitude_std_safe
+        line_significance[line] = sig_line
+        weight_line_level = np.clip(sig_line / min_amp_sigma, 0, 1)
+
+        weight_line = weight_draw * weight_line_level
+        EW_hb_weights.append(weight_line)
+
+    EW_hb_stack = np.array(EW_hb_samples)          # shape (n_lines, n_mc)
+    EW_hb_weight_stack = np.array(EW_hb_weights)   # shape (n_lines, n_mc)
+
+    weight_sum = np.sum(EW_hb_weight_stack, axis=0)
+    weight_sum_safe = np.where(weight_sum == 0, 1, weight_sum)
+    EW_hb_der_mc = np.sum(EW_hb_stack * EW_hb_weight_stack, axis=0) / weight_sum_safe
+    EW_hb_der_mc = np.where(weight_sum == 0,
+                            np.mean(EW_hb_stack, axis=0),
+                            EW_hb_der_mc)
+
+    EW_hb_der = np.mean(EW_hb_der_mc)
+    EW_hb_der_err = np.std(EW_hb_der_mc)
+
+    line_der = ['H1_6563A', 'H1_4861A']
+    for line in line_der:
+        masked_data = mask_nonuse_emission_line(
+            class_, sigmas, line, [data[0], corrected_flux, data[2]])
+        isolated_data = isolate_emission_line(
+            class_, line, datas=masked_data)
+        stamps[line] = isolated_data
+
+        fit_mc, comps, param = model_mc_abs(class_, line, isolated_data,
+                                            sigmas, vel=vel, n_mc=n_mc)
+        params[line] = param
+        absorption_mc = np.zeros((n_mc, len(data[0])))
+        for i in range(n_mc):
+            EW_single = EW_hb_der_mc[i] * EW_all_ratios[line]
+            absorption_mc[i] = neg_gauss_EW_single(class_, line, data[0],
+                                                   param[i],
+                                                   EW_single,
+                                                   vel=vel)
+
+        absorption_mean = np.mean(absorption_mc, axis=0)
+        absorption_std = np.std(absorption_mc, axis=0)
+
+        corrected_flux -= absorption_mean
+        corrected_sigma_full = np.sqrt(data[2]**2 + absorption_std**2)
+
+        absorption_std_small = np.interp(isolated_data[0], data[0],
+                                         absorption_std)
+        corrected_sigma_small = np.sqrt(isolated_data[2]**2 +
+                                        absorption_std_small**2)
+
+        corr_stamps[line] = [isolated_data[0],
+                             isolated_data[1] - np.interp(isolated_data[0],
+                                                          data[0],
+                                                          absorption_mean),
+                             corrected_sigma_small]
+
+        corrected_all_flux.append([data[0], corrected_flux,
+                                   corrected_sigma_full])
+
+    return (fits, fits_eval_stamp, stamps, params, corr_stamps, EW_lines,
+            EW_hb_samples, corrected_all_flux, EW_hb_der, EW_hb_der_err,
+            EW_hb_stack, EW_hb_der_mc, EW_hb_weight_stack, line_significance)
+
+
+# ================================================================
+# EW PROPAGATION
+# ================================================================
+
+# Model how this affects the Hb line
+def model_hb_effect(class_, sigmas, EW_hb_stack, params, stamps,
+                    weights=None, vel=550,
+                    save_path=f'{proj_DIR}images_try'):
+
+    line = 'H1_4861A'
+    param_all = np.asarray(params[line])
+    median_param = np.median(param_all, axis=0)
+
+    stamp_wave, stamp_flux, stamp_err = stamps[line]
+
+    EW_hb_flat = np.asarray(EW_hb_stack).flatten()
+    n_total = len(EW_hb_flat)
+
+    corrected_stamp_flux = np.zeros((n_total, len(stamp_wave)))
+    fits, amplitudes = [], []
+
+    for idx in range(n_total):
+        absorption_stamp = neg_gauss_EW_single(class_, line, stamp_wave,
+                                               median_param, EW_hb_flat[idx],
+                                               vel=vel)
+        corrected_stamp_flux[idx] = stamp_flux - absorption_stamp
+
+        fit = model_flux_list(class_, (stamp_wave, corrected_stamp_flux[idx],
+                                       stamp_err),
+                              [line], sigmas)
+        fits.append(fit)
+
+        A_broad = fit.params[f'{line}_broad_amplitude'].value
+        A_narrow = fit.params[f'{line}_narrow_amplitude'].value
+        amplitudes.append(A_broad + A_narrow)
+
+    amplitudes = np.array(amplitudes)
+
+    if weights is not None:
+        weights_flat = np.asarray(weights).flatten()
+        if len(weights_flat) != n_total:
+            raise ValueError(f'weights length ({len(weights_flat)}) does not '
+                             f'match number of EW samples ({n_total})')
+    else:
+        weights_flat = None
+
+    if save_path is not None:
+        h5_path = f'{save_path}/corr_flux_{class_.names[0][:-5]}.h5'
+        with h5py.File(h5_path, 'w') as f:
+            f.create_dataset('corr_stamp_flux', data=corrected_stamp_flux,
+                             compression='gzip')
+            f.create_dataset('stamp_wave', data=stamp_wave)
+            f.create_dataset('amplitudes', data=amplitudes)
+            if weights_flat is not None:
+                f.create_dataset('weight', data=weights_flat)
+        print(f'Saved corrected fluxes to {h5_path}')
+
+    df_summary = pd.DataFrame({'amplitudes': amplitudes})
+    if weights_flat is not None:
+        df_summary['weight'] = weights_flat
+
+    if save_path is not None:
+        csv_path = f'{save_path}/EW_summary_{class_.names[0][:-5]}.csv'
+        df_summary.to_csv(csv_path, index=False)
+        print(f'Saved summary table to {csv_path}')
+
+    return df_summary, corrected_stamp_flux, fits
+
+
+# Compare corrected amplitudes (already computed once each) against an MC
+# reference distribution built from the uncorrected data
+
+def compare_corrected_to_original(class_, stamps, sigmas, amplitudes_corr,
+                                  line='H1_4861A', save_data=None, num_mc=1000):
+
+    stamp = stamps[line]
+
+    # --- MC only on the uncorrected/original data, to get a reference distribution ---
+    As_or = []
+    for j in range(num_mc):
+        yoff_or = stamp[1] + np.random.randn(len(stamp[1])) * stamp[2]
+        fit_or = model_flux_list(class_, (stamp[0], yoff_or, stamp[2]),
+                                 [line], sigmas=sigmas, plot=False)
+        A_or = (fit_or.params[f'{line}_broad_amplitude'].value
+                + fit_or.params[f'{line}_narrow_amplitude'].value)
+        As_or.append(A_or)
+    As_or = np.array(As_or)
+
+    amplitudes_corr = np.asarray(amplitudes_corr)
+
+    median_or = np.median(As_or)
+    median_corr = np.median(amplitudes_corr)
+    std_or = np.std(As_or)
+    std_corr = np.std(amplitudes_corr)
+
+    combined_err = np.sqrt(std_or**2 + std_corr**2)
+    significance = (median_corr - median_or) / combined_err
+
+    # percentage difference of each corrected sample relative to the
+    # uncorrected reference median
+    pct_diffs = (amplitudes_corr - median_or) / median_or * 100
+
+    result = {
+        'line': line,
+        'As_or': As_or,
+        'As_corr': amplitudes_corr,
+        'pct_diffs': pct_diffs,
+        'significance': significance,
+        'median_or': median_or,
+        'median_corr': median_corr,
+    }
+
+    if save_data is not None:
+        pd.DataFrame([{
+            'line': line, 'median_or': median_or,
+            'median_corr': median_corr, 'significance': significance,
+        }]).to_csv(f'{save_data}/results_summary_{class_.names[0][:-5]}.csv',
+                   index=False)
+
+    return {line: result}
+
+
+# ================================================================
+# Pipeline
+# ================================================================
+
+# Whole algorithm modeling all lines + plots + saving data
+def all_lines_balmer_estimation(class_, data, sigmas, EW_hb_stack=None, vel=550,
+                                used_threshold=1.0,
+                                save_path=f'{proj_DIR}images_try'):
+    lines = list(EW_all_ratios.keys())[2:-1]
+    lines.append('H1_3970A')
+
+    fit_estimation = model_from_list_lines(class_,
+                                            data,
+                                            sigmas,
+                                            lines,
+                                            vel=vel)
+    (fits, fits_eval_stamp, stamps, params,
+     corr_stamps, EW_lines,
+     EW_hb_samples, corrected_all_flux,
+     EW_hb_der, EW_hb_der_err,
+     EW_hb_stack_der, EW_hb_der_mc,
+     EW_hb_weight_stack, line_significance) = fit_estimation
+
+    fig1 = plot_all_fits(class_, lines, stamps, params,
+                         save_path=save_path)
+
+    lines_no_3970 = [l for l in lines if l != 'H1_3970A']
+    fig_hist, fig_all, fig_scatter, fig_bar, fig_used = plot_ew_histograms(
+        class_, EW_hb_samples, weights=EW_hb_weight_stack,
+        lines=lines_no_3970, line_significance=line_significance,
+        used_threshold=used_threshold, save_path=save_path)
+
+    # --- get per-sample corrected amplitudes (single fit per sample, no MC here) ---
+    # EW_hb_stack must be the (n_param, group_size) array of Hb-equivalent EW
+    # samples you want to propagate -- pass explicitly if computed elsewhere,
+    # otherwise reshape EW_hb_der_mc as needed before calling this function.
+    if EW_hb_stack is None:
+        raise ValueError('EW_hb_stack (per-sample EW array for model_hb_effect) '
+                          'must be provided.')
+
+    df_summary, corrected_flux, hb_fits, amplitudes_corr = model_hb_effect(
+        class_, data, sigmas, EW_hb_stack, params,
+        weights=np.asarray(EW_hb_weight_stack).flatten(),
+        vel=vel, save_path=save_path)
+
+    # --- compare corrected amplitudes against MC reference from original data ---
+    results = compare_corrected_to_original(
+        class_, lines[:-1], data, sigmas, amplitudes_corr,
+        save_data=save_path, num_mc=1000)
+
+    fig_pct = plot_pct_diff_histograms(class_, results, save_path=save_path)
+
+    return (results, fit_estimation, df_summary, amplitudes_corr,
+            fig1, fig_hist, fig_all, fig_scatter, fig_bar, fig_used, fig_pct)
+
+
+# ---------------------------------------------
+# Plotting functions
+# ---------------------------------------------
+
+def plotting_fit(lams, flux, fit, linelist, class_):
+    fig2, (ax, ax_res) = plt.subplots(
+        2, 1, figsize=(8, 8),
+        sharex=True,
+        gridspec_kw={'height_ratios': [3, 1], 'hspace': 0.05}
+    )
+
+    comps = fit.eval_components(x=lams)
+    best_fit = comps['polynomial'].copy()
+    for line in linelist:
+        best_fit += (comps[line + '_narrow_'] +
+                     comps[line + '_broad_'])
+
+    # --- Main spectrum ---
+    narrow_key = [key for key, _ in comps.items() if 'narrow' in key]
+    broad_key = [key for key, _ in comps.items() if 'broad' in key]
+
+    ax.plot(lams, flux, lw=1, drawstyle='steps-mid',
+            label='Observed spectrum')
+
+    ax.plot(lams, best_fit, lw=1, drawstyle='steps-mid',
+            label='Best model')
+
+    ax.plot(lams, comps['polynomial'], 'r-',
+            label='Polynomial component',
+            lw=1, drawstyle='steps-mid', alpha=0.3)
+
+    for i, broad_line in enumerate(broad_key):
+        ax.plot(lams, comps[broad_line] + comps['polynomial'],
+                'k--',
+                label='Broad component' if i == len(broad_key)-1 else None,
+                alpha=0.3)
+
+    for i, narrow_line in enumerate(narrow_key):
+        ax.plot(lams, comps[narrow_line] + comps['polynomial'],
+                'g--',
+                label='Narrow component' if i == len(narrow_key)-1 else None,
+                alpha=0.3)
+
+    # --- Residuals ---
+    residuals = (flux - best_fit)
+
+    ax_res.plot(lams, residuals,
+                color='black',
+                lw=1,
+                drawstyle='steps-mid')
+
+    ax_res.axhline(0, color='grey', linestyle='--', lw=1)
+
+    ax_res.set_ylabel('Residuals', size=16)
+    ax_res.set_xlabel(r'Obs. Wavelength ($\AA$)', size=20)
+    # ax_res.set_ylim(-40, 40)
+
+    # --- Emission line markers ---
+    for label in linelist:
+        obs_lam = (class_.linelist_dict[label] *
+                   (1 + fit.params['z'].value))
+
+        ax.axvline(obs_lam, linestyle='--',
+                   linewidth=0.5, color='grey')
+
+        ax.text(obs_lam, 0.99, '\n'+label, rotation=90, ha='center', va='top',
+                color='k', size=8, transform=ax.get_xaxis_transform())
+
+    # --- Formatting ---
+    str = r'Flux ($10^{-17}\ \mathrm{erg\,s^{-1}\,cm^{-2}\,\AA^{-1}}$)'
+    ax.set_ylabel(str, size=20)
+
+    ax.legend(fontsize=14, frameon=True)
+    ax_res.tick_params(
+        axis='both',
+        which='major',
+        labelsize=16,
+        width=2,
+        length=6
+    )
+    ax.tick_params(
+        axis='both',
+        which='major',
+        labelsize=16,
+        width=2,
+        length=6, labelbottom=False
+    )
+    plt.show()
+    return fig2
+
+
+def plot_pct_diff_histograms(class_, results, save_path=None):
+    lines = list(results.keys())
+    ncols = 3
+    nrows = int(np.ceil(len(lines) / ncols))
+
+    fig, axs = plt.subplots(nrows, ncols, figsize=(4*ncols, 3*nrows),
+                            squeeze=False)
+    axs_flat = axs.flatten()
+
+    for i, line in enumerate(lines):
+        pct = results[line]['pct_diffs']
+        sig = results[line]['significance']
+        ax = axs_flat[i]
+        ax.hist(pct, bins=30, color='steelblue', alpha=0.8)
+        ax.axvline(np.median(pct), color='red', linestyle='--')
+        ax.set_title(line)
+        ax.set_xlabel('flux percentage difference (corrected vs original)')
+        ax.text(0.05, 0.9, f"$\\sigma$ = {sig:.2f}", transform=ax.transAxes,
+                fontsize=10, fontweight='bold')
+        lo, hi = np.percentile(pct, [1, 99])
+        ax.set_xlim(lo, hi)
+
+    for k in range(len(lines), len(axs_flat)):
+        axs_flat[k].axis('off')
+
+    plt.tight_layout()
+    if save_path is not None:
+        path = f'{save_path}/percentage_{class_.names[0][:-5]}.png'
+        plt.savefig(path, format='png')
+    plt.show()
+    return fig
+
+
+def plot_all_fits(class_, balmer_lines, stamps, params,
+                  n_show=None, save_path=None, ylim=(5, 30)):
+
+    n_lines = len(balmer_lines) if n_show is None else min(n_show,
+                                                           len(balmer_lines))
+
+    fig, axs = plt.subplots(n_lines, 2, figsize=(10, 3.5 * n_lines),
+                            squeeze=False)
+
+    for i, line in enumerate(balmer_lines[:n_lines]):
+        wave, flux, _ = stamps[line]
+        As = np.array(params[line])
+        n_mc = As.shape[0]
+        median_params = np.median(As, axis=0)
+
+        wave_to_plot = np.linspace(np.min(wave), np.max(wave), 200)
+
+        # Left: data + subset of MC curves
+        plot_idx = np.random.choice(n_mc, size=min(100, n_mc), replace=False)
+        axs[i, 0].step(wave, flux, color='grey', label='Data')
+        for j in plot_idx:
+            axs[i, 0].plot(wave_to_plot,
+                           absorption_func(class_, line, wave_to_plot, *As[j]),
+                           'k-', alpha=0.05)
+        axs[i, 0].set_title(f'{line}: MC iterations')
+        axs[i, 0].set_xlabel('Wavelength (Å)')
+        axs[i, 0].set_ylabel('Flux')
+        axs[i, 0].set_ylim(*ylim)
+        axs[i, 0].legend()
+
+        # Right: data + median fit
+        axs[i, 1].step(wave, flux, color='grey', label='Data')
+        axs[i, 1].plot(wave_to_plot,
+                       absorption_func(class_,
+                                       line, wave_to_plot, *median_params),
+                       color='red', label='Median fit')
+        axs[i, 1].set_title(f'{line}: median fit')
+        axs[i, 1].set_xlabel('Wavelength (Å)')
+        axs[i, 1].set_ylabel('Flux')
+        axs[i, 1].set_ylim(*ylim)
+        axs[i, 1].legend()
+
+    plt.tight_layout()
+    if save_path is not None:
+        path = f'{save_path}/all_fits_{class_.names[0][:-5]}.png'
+        plt.savefig(path, format='png')
+    plt.show()
+    return fig
+
+
+def plot_ew_histograms(class_, EW_hb_samples, weights=None, lines=None,
+                       line_significance=None, used_threshold=0.5,
+                       save_path=None):
+    if lines is None:
+        lines = ['H1_4340A', 'H1_4102A', 'H1_3889A', 'H1_3835A',
+                 'H1_3798A', 'H1_3771A']
+
+    n_lines = len(lines)
+    ncols = 3
+    nrows = int(np.ceil(n_lines / ncols))
+
+    # ---- Histograms: used vs discarded samples, colored separately ----
+    fig, axs = plt.subplots(nrows, ncols, squeeze=False,
+                            figsize=(4*ncols, 3*nrows))
+    axs_flat = axs.flatten()
+
+    n_used_list, n_discarded_list = [], []
+    all_used_EW = []   # NEW: collect used EW across all lines for fig5
+
+    for i, line in enumerate(lines):
+        EW_hb = EW_hb_samples[i]
+        ax = axs_flat[i]
+
+        if weights is not None:
+            w = weights[i]
+            used_mask = w >= used_threshold
+            n_used = np.sum(used_mask)
+            n_discarded = np.sum(~used_mask)
+            n_used_list.append(n_used)
+            n_discarded_list.append(n_discarded)
+
+            if n_used > 0:
+                ax.hist(EW_hb[used_mask], bins=30, alpha=0.7, color='tab:blue',
+                        label=f'used (n={n_used})')
+                all_used_EW.append(EW_hb[used_mask])
+            if n_discarded > 0:
+                ax.hist(EW_hb[~used_mask], bins=30, alpha=0.7, color='tab:red',
+                        label=f'discarded (n={n_discarded})')
+
+            if n_used > 0:
+                mean_used = np.mean(EW_hb[used_mask])
+                ax.axvline(mean_used, color='black', linestyle='--',
+                           label=f'mean (used)={mean_used:.2f}')
+        else:
+            ax.hist(EW_hb, bins=30, alpha=0.8)
+            ax.axvline(np.mean(EW_hb), color='red', linestyle='--',
+                       label=f'mean={np.mean(EW_hb):.2f}')
+
+        # --- NEW: show line-level significance in the title ---
+        title = line
+        if line_significance is not None and line in line_significance:
+            title += f'  (sig={line_significance[line]:.2f}σ)'
+        ax.set_title(title, fontsize=10)
+
+        ax.set_xlabel(r'EW ($H_\beta$)')
+        ax.set_ylabel('Count')
+        ax.legend(fontsize=7)
+
+    for k in range(n_lines, len(axs_flat)):
+        axs_flat[k].axis('off')
+
+    plt.tight_layout()
+    if save_path is not None:
+        path = f'{save_path}/ew_histograms_{class_.names[0][:-5]}.png'
+        plt.savefig(path, format='png')
+    plt.show()
+
+    # ---- EW vs weight scatter, colored by used/discarded ----
+    fig3 = None
+    if weights is not None:
+        fig3, axs3 = plt.subplots(nrows, ncols, squeeze=False,
+                                  figsize=(4*ncols, 3*nrows))
+        axs3_flat = axs3.flatten()
+
+        for i, line in enumerate(lines):
+            ax = axs3_flat[i]
+            w = weights[i]
+            used_mask = w >= used_threshold
+            ax.scatter(EW_hb_samples[i][used_mask], w[used_mask],
+                       s=5, alpha=0.5, color='tab:blue', label='used')
+            ax.scatter(EW_hb_samples[i][~used_mask], w[~used_mask],
+                       s=5, alpha=0.5, color='tab:red', label='discarded')
+            ax.axhline(used_threshold, color='green', linestyle=':',
+                       alpha=0.7, label=f'threshold={used_threshold}')
+
+            title = line
+            if line_significance is not None and line in line_significance:
+                title += f'  (sig={line_significance[line]:.2f}σ)'
+            ax.set_title(title, fontsize=10)
+
+            ax.set_xlabel(r'EW ($H_\beta$)')
+            ax.set_ylabel('Weight')
+            ax.set_ylim(-0.05, 1.05)
+            ax.legend(fontsize=7)
+
+        for k in range(n_lines, len(axs3_flat)):
+            axs3_flat[k].axis('off')
+
+        plt.tight_layout()
+        if save_path is not None:
+            path = f'{save_path}/ew_weight_scatter_{class_.names[0][:-5]}.png'
+            plt.savefig(path, format='png')
+        plt.show()
+
+    # ---- Summary bar chart: how many used vs discarded per line ----
+    fig4 = None
+    if weights is not None:
+        fig4, ax4 = plt.subplots(figsize=(1.2*n_lines + 2, 4))
+        x = np.arange(n_lines)
+        ax4.bar(x, n_used_list, label='used', color='tab:blue')
+        ax4.bar(x, n_discarded_list, bottom=n_used_list,
+                label='discarded', color='tab:red')
+
+        xtick_labels = lines
+        if line_significance is not None:
+            xtick_labels = [f'{l}\n({line_significance.get(l, np.nan):.2f}σ)'
+                            for l in lines]
+        ax4.set_xticks(x)
+        ax4.set_xticklabels(xtick_labels, rotation=45, ha='right')
+        ax4.set_ylabel('Number of MC samples')
+        ax4.set_title(f'Used vs discarded samples (threshold={used_threshold})')
+        ax4.legend()
+        plt.tight_layout()
+        if save_path is not None:
+            path = f'{save_path}/ew_used_discarded_summary_{class_.names[0][:-5]}.png'
+            plt.savefig(path, format='png')
+        plt.show()
+
+    # ---- Combined comparison (all samples, used vs discarded) ----
+    fig2, axs2 = plt.subplots(1, 2, figsize=(10, 4))
+    all_EW_hb = np.concatenate(EW_hb_samples)
+    axs2[0].hist(all_EW_hb, bins=30, alpha=0.6, color='gray', label='all')
+
+    if weights is not None:
+        all_weights = np.concatenate(weights)
+        used_mask_all = all_weights >= used_threshold
+        n_used_all = np.sum(used_mask_all)
+        n_discarded_all = np.sum(~used_mask_all)
+
+        if n_used_all > 0:
+            axs2[0].hist(all_EW_hb[used_mask_all], bins=30, alpha=0.6,
+                         color='tab:blue', label=f'used (n={n_used_all})')
+        if n_discarded_all > 0:
+            axs2[0].hist(all_EW_hb[~used_mask_all], bins=30, alpha=0.6,
+                         color='tab:red', label=f'discarded (n={n_discarded_all})')
+
+        if n_used_all > 0:
+            mean_used_all = np.mean(all_EW_hb[used_mask_all])
+            axs2[0].axvline(mean_used_all, color='black', linestyle='--',
+                            label=f'mean (used)={mean_used_all:.2f}')
+        else:
+            mean_all = np.mean(all_EW_hb)
+            axs2[0].axvline(mean_all, color='black', linestyle='--',
+                            label=f'mean (all, no used)={mean_all:.2f}')
+    else:
+        axs2[0].axvline(np.mean(all_EW_hb), color='red', linestyle='--',
+                        label=f'mean={np.mean(all_EW_hb):.2f}')
+
+    axs2[0].set_title('All Balmer lines combined')
+    axs2[0].set_xlabel(r'EW ($H_\beta$)')
+    axs2[0].set_ylabel('Count')
+    axs2[0].legend(fontsize=8)
+
+    for i, line in enumerate(lines):
+        axs2[1].hist(EW_hb_samples[i], bins=15, alpha=0.5, label=line)
+    axs2[1].set_title('Individual Balmer lines')
+    axs2[1].set_xlabel(r'EW ($H_\beta$)')
+    axs2[1].set_ylabel('Count')
+    axs2[1].legend(fontsize=8)
+
+    plt.tight_layout()
+    if save_path is not None:
+        path = f'{save_path}/ew_all_histograms_{class_.names[0][:-5]}.png'
+        plt.savefig(path, format='png')
+    plt.show()
+
+    # ---- NEW fig5: combined histogram using ONLY used EW ----
+    fig5 = None
+    if weights is not None and len(all_used_EW) > 0:
+        all_used_EW_concat = np.concatenate(all_used_EW)
+        fig5, ax5 = plt.subplots(figsize=(6, 4))
+        ax5.hist(all_used_EW_concat, bins=30, alpha=0.8, color='tab:blue',
+                 label=f'used only (n={len(all_used_EW_concat)})')
+        mean_used_only = np.mean(all_used_EW_concat)
+        std_used_only = np.std(all_used_EW_concat)
+        ax5.axvline(mean_used_only, color='black', linestyle='--',
+                    label=f'mean={mean_used_only:.2f} ± {std_used_only:.2f}')
+        ax5.set_title('All Balmer lines combined (used samples only)')
+        ax5.set_xlabel(r'EW ($H_\beta$)')
+        ax5.set_ylabel('Count')
+        ax5.legend(fontsize=8)
+        plt.tight_layout()
+        if save_path is not None:
+            path = f'{save_path}/ew_used_only_combined_{class_.names[0][:-5]}.png'
+            plt.savefig(path, format='png')
+        plt.show()
+
+    return fig, fig2, fig3, fig4, fig5
+
+
+# ----------------------------------------------
+# Ultimate pipeline for correction
+# ----------------------------------------------
+
+
+def default_balmer_lines_to_correct():
+    """
+    Every line in EW_all_ratios EXCEPT H_alpha/H_beta, plus H1_3970A
+    (H_epsilon, which has no Aver ratio but is still corrected using
+    its own directly-fitted amplitude).
+    """
+    exclude = {'H1_6563A', 'H1_4861A'}
+    lines = [line for line in EW_all_ratios if line not in exclude]
+    lines.append('H1_3970A')
+    return lines
+
+
+def correct_balmer_lines(class_, data, sigmas, lines, vel=550, n_mc=1000):
+    """
+    For each line in `lines`: isolate it, fit it n_mc times via MC,
+    take the MEDIAN fitted amplitude, and subtract that single
+    Gaussian from the full spectrum. Also records each line's EW
+    (median + std across the n_mc fits) -- recorded only, not used
+    for any correction here.
+    """
+    corrected_flux = data[1].copy()
+    stamps, params, medians, ew_info = {}, {}, {}, {}
+
+    for line in lines:
+        print(f'Correcting {line}...')
+        masked_data = mask_nonuse_emission_line(
+            class_, sigmas, line, [data[0], corrected_flux, data[2]])
+        isolated_data = isolate_emission_line(
+            class_, line, datas=masked_data)
+        stamps[line] = isolated_data
+
+        _, _, param = model_mc_abs(
+            class_, line, isolated_data, sigmas, vel=vel, n_mc=n_mc)
+        param = np.asarray(param)
+        params[line] = param
+
+        median_height = np.median(param[:, 0])
+        medians[line] = median_height
+
+        # EW computed and recorded for later use -- NOT applied here
+        EW_samples = get_EW_from_mc(class_, line, param, vel=vel)
+        ew_info[line] = (np.median(EW_samples), np.std(EW_samples))
+
+        absorption = neg_gauss(class_, line, data[0], median_height)
+        corrected_flux -= absorption
+
+    return corrected_flux, stamps, params, medians, ew_info
+
+
+def save_corrected_data(class_, data, corrected_flux, save_dir):
+    """
+    Save the Balmer-absorption-corrected spectrum to a CSV, matching
+    the existing file-handoff pattern used elsewhere in the pipeline.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = f'{save_dir}/bcorr_{class_.gal_id}_new.csv'
+
+    df = pd.DataFrame({'wave': data[0], 'flux': corrected_flux,
+                       'sigma': data[2]})
+    df.to_csv(save_path, index=False)
+
+    print(f'Saved Balmer absorption corrected data to: {save_path}')
+    return save_path
+
+
+def save_ew_info(class_, ew_info, save_dir):
+    """
+    Save each line's EW (median + std across the n_mc fits) to a CSV,
+    for later use (e.g. a future H_alpha/H_beta ratio-based
+    correction). Purely a record -- not consumed by this pipeline.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = f'{save_dir}/ew_info_{class_.gal_id}_new.csv'
+
+    df = pd.DataFrame([
+        {'line': line, 'EW_median': med, 'EW_std': std}
+        for line, (med, std) in ew_info.items()
+    ])
+    df.to_csv(save_path, index=False)
+
+    print(f'Saved EW info to: {save_path}')
+    return save_path
+
+
+def save_mc_realizations(class_, params, save_dir):
+    """
+    Save the FULL set of n_mc MC realizations (not just the median) for
+    every line, to an HDF5 file. One group per line, containing:
+      - height : array (n_mc,) - fitted amplitude per realization
+      - m, n   : arrays (n_mc,) - fitted linear continuum per realization
+      - EW     : array (n_mc,) - EW computed from that realization
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = f'{save_dir}/mc_realizations_{class_.gal_id}_new.h5'
+
+    with h5py.File(save_path, 'w') as f:
+        for line, param in params.items():
+            grp = f.create_group(line)
+            grp.create_dataset('height', data=param[:, 0], compression='gzip')
+            grp.create_dataset('m', data=param[:, 1], compression='gzip')
+            grp.create_dataset('n', data=param[:, 2], compression='gzip')
+            EW_samples = get_EW_from_mc(class_, line, param)
+            grp.create_dataset('EW', data=EW_samples, compression='gzip')
+
+    print(f'Saved {len(params)} lines x {next(iter(params.values())).shape[0]} '
+          f'MC realizations to: {save_path}')
+    return save_path
+
+
+def run_balmer_correction_pipeline(class_, lines=None, vel=550, n_mc=1000,
+                                   save_dir=None):
+    """
+    Full pipeline: read data, estimate sigmas, correct every
+    intermediate Balmer line (median of n_mc MC fits per line), save
+    the corrected spectrum, save each line's EW summary, and save the
+    full n_mc realizations for every line.
+
+    Returns
+    -------
+    corrected_flux, stamps, params, medians, ew_info,
+    save_path, ew_path, mc_path
+    """
+    if lines is None:
+        lines = default_balmer_lines_to_correct()
+
+    if save_dir is None:
+        save_dir = f'{proj_DIR}bal_abs'
+
+    data = read_data(class_)
+    sigmas = first_sigma_est(class_, data, plot=False)
+
+    corrected_flux, stamps, params, medians, ew_info = correct_balmer_lines(
+        class_, data, sigmas, lines, vel=vel, n_mc=n_mc)
+
+    save_path = save_corrected_data(class_, data, corrected_flux, save_dir)
+    ew_path = save_ew_info(class_, ew_info, save_dir)
+    mc_path = save_mc_realizations(class_, params, save_dir)
+
+    return (corrected_flux, stamps, params, medians, ew_info,
+            save_path, ew_path, mc_path)
