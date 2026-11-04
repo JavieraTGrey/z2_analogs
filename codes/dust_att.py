@@ -111,29 +111,32 @@ def save_corrected(res, law, results_dir=None):
     gal_id = res['gal_id']
     results_dir = results_dir or f'{PROJ_DIR}new_results'
     safe = law.replace(':', '_')
+    tag = res.get('tag', '')
     folder = f'{results_dir}/{gal_id}'
-    corrected.to_csv(f'{folder}/{gal_id}_lines_info_dustcorr_{safe}.csv',
+    corrected.to_csv(f'{folder}/{gal_id}_lines_info{tag}_dustcorr_{safe}.csv',
                      index=False)
     flux_summary(corrected).to_csv(
-        f'{folder}/{gal_id}_lines_summ_dustcorr_{safe}.csv')
-    print(f'Saved {gal_id}_lines_info/summ_dustcorr_{safe}.csv in {folder}')
+        f'{folder}/{gal_id}_lines_summ{tag}_dustcorr_{safe}.csv')
+    print(f'Saved {gal_id}_lines_info/summ{tag}_dustcorr_{safe}.csv in {folder}')
     return corrected
+
 
 
 # ================================================================
 # Run everything for one galaxy
 # ================================================================
 
-def run_dust(class_, laws=('ccm', 'calzetti', 'smc', 'linear', 'power',
-                           'ccm:fit', 'calzetti:fit'),
-             rv_grid=None, hybrid=True, hybrid_red_frac=None,
+
+def run_dust(class_, laws=('ccm', 'calzetti', 'power'), tag='_mw_abs',
+             extra_exclude=(),
+             rv_grid=None, hybrid=False, hybrid_red_frac=None,
              hybrid_smooth=False, hybrid_shape='power',
              apply_law='ccm',
              exclude=EXCLUDE_DEFAULT, min_snr=3.0, tem=1e4,
              den=100.0, save=True):
     """
     Dust correction for one galaxy, using the saved MC line fluxes.
-
+ 
     laws      : laws to compute E(B-V) with. 'power' means: fit beta;
                 'ccm:fit' means: fit Cardelli's R_V;
                 'calzetti:fit' means: fit the modified Calzetti tilt delta.
@@ -154,30 +157,33 @@ def run_dust(class_, laws=('ccm', 'calzetti', 'smc', 'linear', 'power',
     tem, den  : T_e and n_e for the Case B ratios
     """
     gal_id = class_.names[0][:5]
-
+ 
     air_wave = {}
     for _, row in class_.load_line_list()[0].iterrows():
         air_wave[row['name']] = row['wavelength']
-
+ 
     vac_wave = {}
     for _, row in class_.load_line_list()[0].iterrows():
         vac_wave[row['name']] = row['vacuum_wave']
-
+ 
     print(f'=== {gal_id} ===')
-
+ 
     # load the saved line fits ----
     results_dir = PROJ_DIR + 'new_results'
-    info = pd.read_csv(f'{results_dir}/{gal_id}/{gal_id}_lines_info.csv')
+    info = pd.read_csv(f'{results_dir}/{gal_id}/{gal_id}_lines_info{tag}.csv')
     # drop unnecessary columns
     if 'Unnamed: 0' in info.columns:
         info = info.drop(columns=['Unnamed: 0'])
-
+ 
     # Read fluxes as a table
     file_table = load_flux_samples(gal_id, info=info)
-
+ 
     # Check the Hydrogen lines to use
-    lines = select_hydrogen_lines(file_table, air_wave, exclude, min_snr)
-
+    excl = set(exclude)
+    for line in extra_exclude:
+        excl.add(line)
+    lines = select_hydrogen_lines(file_table, air_wave, excl, min_snr)
+ 
     # Intrinsic ratios
     case_ratios = case_b_ratios(lines, vac_wave, tem=tem, den=den)
     # keep only lines that got a Case B ratio
@@ -185,9 +191,9 @@ def run_dust(class_, laws=('ccm', 'calzetti', 'smc', 'linear', 'power',
     for line in lines:
         if line in case_ratios:
             good_lines.append(line)
-
+ 
     print(f'Using {len(good_lines)} H I lines: {good_lines}')
-
+ 
     # Build the full list of laws
     law_list = []
     power_law = None
@@ -234,15 +240,15 @@ def run_dust(class_, laws=('ccm', 'calzetti', 'smc', 'linear', 'power',
                 print('  warning: delta at the edge of the grid (-1 to 0.4)')
             calz_fit_law = law
         law_list.append(law)
-
+ 
     if rv_grid is not None:
         for name in rv_grid:
             for rv in rv_grid[name]:
                 law_list.append(f'{name}:{rv}')
-
+ 
     for law in law_list:
         register_law(law)
-
+ 
     # E(B-V) for each realization
     per_line = {}
     combined = {}
@@ -251,13 +257,13 @@ def run_dust(class_, laws=('ccm', 'calzetti', 'smc', 'linear', 'power',
                                      air_wave)
         combined[law] = ebv_combined(file_table, good_lines, case_ratios, law,
                                      air_wave)
-
+ 
         e = combined[law] * ebv_scale(law)     # always E(B-V)
         med = e.median()
         up = e.quantile(0.84) - med
         low = med - e.quantile(0.16)
         print(f'E(B-V) [{law}] = {med:.3f} +{up:.3f} -{low:.3f}')
-
+ 
     # Hybrid law: E(B-V) from H-alpha/H-beta only
     hybrid_law = None
     hybrid_npar = 0
@@ -274,13 +280,13 @@ def run_dust(class_, laws=('ccm', 'calzetti', 'smc', 'linear', 'power',
         combined[hybrid_law] = per_line[hybrid_law]['H1_6563A']
         e = combined[hybrid_law]
         print(f'E(B-V) [{hybrid_law}] = {e.median():.3f} (from H-alpha)')
-
+ 
     # 'power' and 'hybrid' mean the fitted versions
     if apply_law == 'power':
         apply_law = power_law
     if apply_law == 'hybrid':
         apply_law = hybrid_law
-
+ 
     # Correct the line fluxes (skipped when no law is applied yet)
     corrected = None
     corrected_summary = None
@@ -290,34 +296,34 @@ def run_dust(class_, laws=('ccm', 'calzetti', 'smc', 'linear', 'power',
         corrected_summary = flux_summary(corrected)
     else:
         print('No law applied: compare the laws, then rerun with apply_law')
-
+ 
     # Save new data
     if save:
-        out_dir = f'{results_dir}/{gal_id}'
+        out_dir = f'{results_dir}/dust/{gal_id}'
         os.makedirs(out_dir, exist_ok=True)
         for law in law_list:
             # E(B-V) from each line ratio (power/linear converted from A_Hb)
             edv_perline = pd.DataFrame(per_line[law]) * ebv_scale(law)
             safe = law.replace(':', '_')     # no ':' in file names
-            edv_perline.to_csv(f'{out_dir}/{gal_id}_ebv_perline_{safe}.csv')
-
+            edv_perline.to_csv(f'{out_dir}/{gal_id}{tag}_ebv_perline_{safe}.csv')
+ 
         # E(B-V) per realization for every law (power/linear converted
         # from A_Hb), one column per law
         ebv_save = {}
         for law in law_list:
             ebv_save[law] = combined[law] * ebv_scale(law)
-        pd.DataFrame(ebv_save).to_csv(f'{out_dir}/{gal_id}_ebv_samples.csv')
+        pd.DataFrame(ebv_save).to_csv(f'{out_dir}/{gal_id}{tag}_ebv_samples.csv')
         if corrected is not None:
             # law name in the file names, e.g. ..._dustcorr_ccm.csv, so
             # nothing is overwritten (not even the uncorrected tables)
             safe = apply_law.replace(':', '_')
             corrected.to_csv(
-                f'{out_dir}/{gal_id}_lines_info_dustcorr_{safe}.csv',
+                f'{out_dir}/{gal_id}_lines_info{tag}_dustcorr_{safe}.csv',
                 index=False)
             corrected_summary.to_csv(
-                f'{out_dir}/{gal_id}_lines_summ_dustcorr_{safe}.csv')
+                f'{out_dir}/{gal_id}_lines_summ{tag}_dustcorr_{safe}.csv')
         print(f'Saved results in {out_dir}')
-
+ 
     # Plotting info
     res = {
         'gal_id': gal_id,

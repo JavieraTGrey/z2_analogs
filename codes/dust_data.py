@@ -22,7 +22,6 @@ EXCLUDE_DEFAULT = {
     'H1_3771A',
     'H1_3889A',
     'H1_3970A',
-    'H1_4102A',
     'H1_8392A',
     'H1_8438A',
     'H1_8467A',
@@ -160,12 +159,12 @@ def rest_wavelength(label, linelist_dict=None):
 # ================================================================
 
 # Get Path
-def info_path(gal_id, results_dir=None):
+def info_path(gal_id, results_dir=None, tag=''):
     results_dir = results_dir or f'{PROJ_DIR}new_results'
-    return f'{results_dir}/{gal_id}/{gal_id}_lines_info.csv'
+    return f'{results_dir}/{gal_id}/{gal_id}_lines_info{tag}.csv'
 
 
-def load_flux_samples(gal_id, results_dir=None, info=None):
+def load_flux_samples(gal_id, results_dir=None, info=None, tag=''):
     """Wide table of total flux (narrow + broad): rows = MC realization i,
     columns = line label.
 
@@ -173,7 +172,7 @@ def load_flux_samples(gal_id, results_dir=None, info=None):
     (iter, line1, line 2), (0, num1, num2), .... etc
     """
     if info is None:
-        info = pd.read_csv(info_path(gal_id, results_dir))
+        info = pd.read_csv(info_path(gal_id, results_dir, tag))
         # Remove leftover index columns
         drop = []
         for c in info.columns:

@@ -423,22 +423,22 @@ def _draw_attenuation(ax, axr, res, laws, linthresh, xscale, labels=True):
     axr.axhline(0, color='0.6', ls=':', lw=1)
 
     # symmetric log: linear for |residual| < linthresh, log outside
-    axr.set_yscale('symlog', linthresh=linthresh)
+    # axr.set_yscale('line')
     axr.axhspan(-linthresh, linthresh, color='0.85', alpha=0.4, zorder=0)
     axr.set_ylim(-1.5 * biggest, 1.5 * biggest)
-    ticks = []
-    tick_labels = []
-    for t in (-1, -0.3, -0.1, -0.03, -0.01, 0, 0.01, 0.03, 0.1, 0.3, 1):
-        if abs(t) <= 1.5 * biggest and (t == 0 or abs(t) >= linthresh / 2):
-            ticks.append(t)
-            tick_labels.append(f'{t:g}')
-    axr.set_yticks(ticks)
-    axr.set_yticklabels(tick_labels)
+    # ticks = []
+    # tick_labels = []
+    # # for t in (-1, -0.3, -0.1, -0.03, -0.01, 0, 0.01, 0.03, 0.1, 0.3, 1):
+    # #     if abs(t) <= 1.5 * biggest and (t == 0 or abs(t) >= linthresh / 2):
+    # #         ticks.append(t)
+    # #         tick_labels.append(f'{t:g}')
+    # axr.set_yticks(ticks)
+    # axr.set_yticklabels(tick_labels)
     axr.minorticks_off()
     set_wavelength_scale(axr, xscale)
 
     ax.set_ylabel(r'$A_\lambda - A_{\rm H\beta}$ (mag)', fontsize=16)
-    axr.set_ylabel('obs $-$ law\n(mag, symlog)', fontsize=12)
+    axr.set_ylabel('obs $-$ law\n(mag)', fontsize=12)
     axr.set_xlabel(r'Rest wavelength ($\AA$)', fontsize=16)
 
 
@@ -716,7 +716,7 @@ def make_all_plots(res, plot_dir, laws=None):
     os.makedirs(plot_dir, exist_ok=True)
     g = res['gal_id']
     if laws is None:
-        laws = ['ccm', 'calzetti']
+        laws = list(res['laws'])
         if res['apply_law'] is not None and res['apply_law'] not in laws:
             laws.append(res['apply_law'])
 
