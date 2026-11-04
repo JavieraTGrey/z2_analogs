@@ -790,7 +790,9 @@ def run_balmer_series_pipeline(class_, n_mc=1000, base_dir=None, plot=True,
                                deg=4, seed=None, save=True, use_hgamma=True,
                                vel_metal=None, ew_hb_override=None,
                                vel_grid=None, rest_window=(3730., 4160.),
-                               hgamma_own=True):
+                               hgamma_own=True,
+                               subtract_kinds=('balmer', 'metal', 'cn'),
+                               min_snr=3.0):
 
     import balmer_series as bs
 
@@ -834,7 +836,8 @@ def run_balmer_series_pipeline(class_, n_mc=1000, base_dir=None, plot=True,
     if plot:
         bs.plot_series(res, class_, save_path=plot_dir)
     corrected_flux = flux - bs.series_absorption(res, wave,
-                                                 kinds=('balmer', 'cn'))
+                                                 kinds=subtract_kinds,
+                                                 min_snr=min_snr)
     vel = float(np.median(res['vel_draws']))
 
     ew_draws = {}
@@ -867,9 +870,8 @@ def run_balmer_series_pipeline(class_, n_mc=1000, base_dir=None, plot=True,
     if own_hg:
         # H_gamma corrected with the absorption of its OWN local fit (the
         # red dip at H_gamma in the hgamma_fit plot)
-        corrected_flux = corrected_flux - bs.series_absorption(res_hg, wave,
-                                                               kinds=('balmer',
-                                                                      'cn'))
+        corrected_flux = corrected_flux - bs.series_absorption(
+            res_hg, wave, kinds=subtract_kinds, min_snr=min_snr)
         k_hg = res_hg['names'].index('H1_4340A')
         ew_hg = res_hg['ew_draws']['H1_4340A']
         mu = class_.linelist_dict['H1_4340A'] * (1 + class_.redshift)
@@ -884,8 +886,12 @@ def run_balmer_series_pipeline(class_, n_mc=1000, base_dir=None, plot=True,
         print(f"  H1_4340A: corrected with its own fit, EW = "
               f"{np.median(ew_hg):.2f} +- {np.std(ew_hg):.2f} A")
     elif res_hg is not None:
-        corrected_flux = corrected_flux - bs.series_absorption(res_hg, wave,
-                                                               kinds=('cn',))
+        hg_kinds = []
+        for kind in subtract_kinds:
+            if kind != 'balmer':
+                hg_kinds.append(kind)
+        corrected_flux = corrected_flux - bs.series_absorption(
+            res_hg, wave, kinds=tuple(hg_kinds), min_snr=min_snr)
     if plot:
         used = []
         for _, row in ew_table.iterrows():
