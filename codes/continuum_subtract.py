@@ -143,7 +143,6 @@ def one_continuum(wave, flux, err, linelist_dict, z0, kin, dlam,
             'sigma_local': corr_err, 'free': free}
 
 
-
 def noise_scale(wave, r, free, half_window=150.0, step=25.0, max_lag=4,
                 n_line=8, min_pix=40):
     """How wrong the pixel errors are, as a function of wavelength.
@@ -216,6 +215,7 @@ def residual_envelope(resid, flag, grow=2):
 # ================================================================
 # Main function
 # ================================================================
+
 
 def build_continuum(wave, flux, err, linelist_dict, z0, kin,
                     dlam_best=200.0, dlams=(100.0, 150.0, 200.0, 300.0),
