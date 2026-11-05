@@ -807,7 +807,7 @@ def balmer_dir(class_, base_dir=None):
     """Folder of one galaxy: {base_dir}/{gal}, default
     {proj_DIR}new_results/balmer_abs/{gal}."""
     if base_dir is None:
-        base_dir = f'{proj_DIR}new_results/balmer_abs'
+        base_dir = f'{proj_DIR}new_results/balmer_abs_final'
     return f'{base_dir}/{class_.gal_id}'
 
 
@@ -1075,9 +1075,9 @@ def add_abs_and_save(class_, proj_DIR, bal_dir=None, tag_in='_mw',
 
     gal = class_.gal_id
     if bal_dir is None:
-        bal_dir = balmer_dir(class_, f'{proj_DIR}new_results/balmer_abs')
-    folder = f'{proj_DIR}new_results/{gal}'
-    info = pd.read_csv(f'{folder}/{gal}_lines_info{tag_in}.csv')
+        bal_dir = balmer_dir(class_, f'{proj_DIR}new_results/balmer_abs_final/')
+    folder = f'{proj_DIR}new_results/{gal}/'
+    info = pd.read_csv(f'{folder}lines/{gal}_lines_info{tag_in}.csv')
     draws = abs_flux_draws(class_, f'{bal_dir}/mc_realizations_{gal}_new.h5',
                            vel=vel)
 
@@ -1103,6 +1103,7 @@ def add_abs_and_save(class_, proj_DIR, bal_dir=None, tag_in='_mw',
 
     out = add_abs_uncertainty(info, draws, seed=seed, leak=leak_dict)
     abs_error_report(info, out, list(draws.keys()))
-    out.to_csv(f'{folder}/{gal}_lines_info{tag_out}.csv', index=False)
+    os.makedirs(f'{folder}/lines', exist_ok=True)
+    out.to_csv(f'{folder}lines/{gal}_lines_info{tag_out}.csv', index=False)
     print(f'Saved {gal}_lines_info{tag_out}.csv')
     return out
