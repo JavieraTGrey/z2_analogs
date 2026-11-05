@@ -41,11 +41,20 @@ def read_data(class_):
     """
     gal_id = class_.names[0][:5]
     print(f'Reading data for {gal_id}')
-    file_path_balmer = f'{proj_DIR}new_results/bcorr_{gal_id}_new.csv'
-    file_path_MW = f'{proj_DIR}dust/{gal_id}/dcorr_{gal_id}.csv'
+    file_path_contsub = (f'{proj_DIR}new_results/cont_sub_final/{gal_id}/'
+                         f'{gal_id}_contsub.csv')
+    file_path_balmer = (f'{proj_DIR}new_results/balmer_abs_final/{gal_id}/'
+                        f'bcorr_{gal_id}_new.csv')
+    file_path_MW = (f'{proj_DIR}new_results/MW_dust/{gal_id}/'
+                    f'dcorr_{gal_id}.csv')
 
+    if os.path.exists(file_path_contsub):
+        print("Using continuum subtracted data")
+        contsub = pd.read_csv(file_path_contsub)
+        arrays = contsub.to_numpy().T
+        wave, flux, sigma = arrays
     # Balmer + MW corrected data
-    if os.path.exists(file_path_balmer):
+    elif os.path.exists(file_path_balmer):
         print("Using Balmer Absorption + MW dust corrected data")
         bcorr = pd.read_csv(file_path_balmer)
         arrays = bcorr.to_numpy().T
@@ -197,9 +206,14 @@ def model_flux_list(class_, stamp, linelist, deg=1,
                  expr=f'(sigma_v_broad/3e5)*{label}_broad_center')
 
     for i in range(polydeg + 1):
-        pars[f'c{i}'].set(value=1.0, vary=True)
+        pars[f'c{i}'].set(value=0.0, vary=True)
 
-    out = model.fit(stamp[1], pars, x=stamp[0],
+    err = stamp[2]
+    weights = np.zeros(len(err))
+    good = np.isfinite(err) & (err > 0)
+    weights[good] = 1.0 / err[good]
+
+    out = model.fit(stamp[1], pars, x=stamp[0], weights=weights,
                     nan_policy='omit', max_nfev=1000)
 
     if plot:
@@ -306,10 +320,19 @@ def summarize(info):
     return summary
 
 
-def get_fixed_ratios(info):
+EXCLUDE_FROM_RATIOS = ('N2_6548A', 'N2_6583A', 'He1_5016A')
+
+
+def get_fixed_ratios(info, exclude=EXCLUDE_FROM_RATIOS):
     """Median ratio_H (H I lines) and ratio_metal from fits not on a bound."""
     d = add_derived(info)
     ok = (~d['ratio_on_bound']) & (d['nar_amplitude'] > 0)
+    keep = np.ones(len(d), dtype=bool)
+    labels = d['label'].values
+    for k in range(len(d)):
+        if labels[k] in exclude:
+            keep[k] = False
+    ok = ok & keep
 
     H = d['label'].str.startswith('H1_')
     metal = d['ratio_type'] == 'ratio_metal'
@@ -323,7 +346,7 @@ def get_fixed_ratios(info):
 
 def _paths(class_):
     gal_id = class_.names[0][:5]
-    out_dir = f'{proj_DIR}new_results/{gal_id}'
+    out_dir = f'{proj_DIR}new_results/{gal_id}/cont'
     os.makedirs(out_dir, exist_ok=True)
     return (f'{out_dir}/{gal_id}_lines_info.csv',
             f'{out_dir}/{gal_id}_lines_summ.csv')
@@ -409,19 +432,21 @@ def measure_other_lines(class_, other_lines=None, n_mc=100, deg=1,
     return info, summary
 
 
-def measure_everything(class_, n_mc=100, plot=False):
+def measure_everything(class_, n_mc=100, plot=False, deg_bright=0,
+                       deg_other=0):
 
     bright_lines, bright_groups = get_line_groups()
-    _ = fit_quality_table(class_, bright_lines, bright_groups, plot=False)
+    _ = fit_quality_table(class_, bright_lines, bright_groups,
+                          deg=deg_bright, plot=False)
 
     print('--- Step 1: bright lines (free ratio) ---')
     measure_all_lines(class_, bright_lines, bright_groups,
-                      n_mc=n_mc, deg=1, ratio=None, plot=plot)
+                      n_mc=n_mc, deg=deg_bright, ratio=None, plot=plot)
 
     print('--- Step 2: other lines (fixed ratio) ---')
     info, summary = measure_other_lines(class_,
                                         other_lines=class_.line_name.values,
-                                        n_mc=n_mc, deg=5, plot=plot)
+                                        n_mc=n_mc, deg=deg_other, plot=plot)
     return info, summary
 
 # -----------------------------------------
@@ -542,8 +567,8 @@ def fit_quality(class_, out, stamp, linelist, edge_frac=0.15):
     cont = np.polyval(np.polyfit(wave[ok], flux[ok], 1), wave)
 
     # all fitted line emission (no polynomial)
-    lines_model = np.sum([comps[f'{l}_narrow_'] + comps[f'{l}_broad_']
-                          for l in linelist], axis=0)
+    lines_model = np.sum([comps[f'{line}_narrow_'] + comps[f'{line}_broad_']
+                          for line in linelist], axis=0)
 
     # goodness of fit for the whole group
     good = np.isfinite(flux) & (err > 0)
@@ -552,22 +577,22 @@ def fit_quality(class_, out, stamp, linelist, edge_frac=0.15):
     max_res = np.max(np.abs(resid))
 
     # windows: split at midpoints between observed line centers
-    centers = {l: class_.linelist_dict[l] * (1 + p[f'z_{l}'].value)
-               for l in linelist}
+    centers = {line: class_.linelist_dict[line] * (1 + p[f'z_{line}'].value)
+               for line in linelist}
     ordered = sorted(linelist, key=centers.get)
     mids = [0.5 * (centers[a] + centers[b])
             for a, b in zip(ordered[:-1], ordered[1:])]
     bounds = [-np.inf] + mids + [np.inf]
 
     rows = []
-    for l, lo, hi in zip(ordered, bounds[:-1], bounds[1:]):
+    for line, lo, hi in zip(ordered, bounds[:-1], bounds[1:]):
         win = ~side & (wave >= lo) & (wave < hi)
         direct = np.nansum(((flux - cont) * dlam)[win])
         model_win = np.nansum((lines_model * dlam)[win])
         rows.append({
-            'line': l,
-            'fitted_flux': (p[f'{l}_narrow_amplitude'].value
-                            + p[f'{l}_broad_amplitude'].value),
+            'line': line,
+            'fitted_flux': (p[f'{line}_narrow_amplitude'].value
+                            + p[f'{line}_broad_amplitude'].value),
             'direct_over_model': direct / model_win,
             'redchi': redchi,
             'max_abs_resid_sigma': max_res,
@@ -592,6 +617,8 @@ def fit_quality_table(class_, linelist_all, linelist_group, deg=1, plot=True):
 
     df = pd.DataFrame(rows)
     gal_id = class_.names[0][:5]
-    df.to_csv(f'{proj_DIR}new_results/{gal_id}/{gal_id}_fit_quality.csv',
+    out_dir = f'{proj_DIR}new_results/{gal_id}/cont'
+    os.makedirs(out_dir, exist_ok=True)
+    df.to_csv(f'{out_dir}/{gal_id}_fit_quality.csv',
               index=False)
     return df
