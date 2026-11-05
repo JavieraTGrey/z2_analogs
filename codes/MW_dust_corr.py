@@ -136,6 +136,7 @@ def run(class_, ext_path=None, calib_frac=0.10, Rv=3.1,
         fig.savefig(f'{folder}/MWcorr_{gal}.png', dpi=130, bbox_inches='tight')
     return t, E_mw, sigma_E
 
+
 def add_mw_uncertainty(info, linelist_dict, z, E_mw, sigma_E, Rv=3.1,
                        seed=None):
     rng = np.random.default_rng(seed)
@@ -158,16 +159,21 @@ def add_mw_uncertainty(info, linelist_dict, z, E_mw, sigma_E, Rv=3.1,
     return out
 
 
-def add_mw_and_save(class_, proj_DIR, tag_in='', tag_out='_mw', seed=None):
+def add_mw_and_save(class_, proj_DIR, tag_in='', tag_out='_mw', seed=None,
+                    folder=None):
+
     gal = class_.gal_id
-    side = pd.read_csv(f'{proj_DIR}new_results/MW_dust/{gal}/dcorr_{gal}_mw.csv', nrows=1)
+    side = pd.read_csv(f'{proj_DIR}new_results/MW_dust/{gal}/'
+                       f'dcorr_{gal}_mw.csv', nrows=1)
     E_mw = float(side['E_MW'].iloc[0])
     sigma_E = float(side['sigma_E'].iloc[0])
-    folder = f'{proj_DIR}new_results/{gal}'
-    info = pd.read_csv(f'{folder}/{gal}_lines_info{tag_in}.csv')
+    if folder is None:
+        folder = f'{proj_DIR}new_results/{gal}/'
+    import os
+    os.makedirs(f'{folder}/lines', exist_ok=True)
+    info = pd.read_csv(f'{folder}MW/{gal}_lines_info{tag_in}.csv')
     out = add_mw_uncertainty(info, class_.linelist_dict, class_.redshift,
                              E_mw, sigma_E, seed=seed)
-    out.to_csv(f'{folder}/{gal}_lines_info{tag_out}.csv', index=False)
+    out.to_csv(f'{folder}lines/{gal}_lines_info{tag_out}.csv', index=False)
     print(f'Saved {gal}_lines_info{tag_out}.csv '
           f'(E_MW = {E_mw:.4f} +- {sigma_E:.4f} drawn per realization)')
-    return out
