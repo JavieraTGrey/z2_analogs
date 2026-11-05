@@ -112,11 +112,12 @@ def save_corrected(res, law, results_dir=None):
     results_dir = results_dir or f'{PROJ_DIR}new_results'
     safe = law.replace(':', '_')
     tag = res.get('tag', '')
-    folder = f'{results_dir}/{gal_id}'
-    corrected.to_csv(f'{folder}/{gal_id}_lines_info{tag}_dustcorr_{safe}.csv',
+    folder = f'{results_dir}/{gal_id}/lines/'
+    os.makedirs(folder, exist_ok=True)
+    corrected.to_csv(f'{folder}{gal_id}_lines_info{tag}_dustcorr_{safe}.csv',
                      index=False)
     flux_summary(corrected).to_csv(
-        f'{folder}/{gal_id}_lines_summ{tag}_dustcorr_{safe}.csv')
+        f'{folder}{gal_id}_lines_summ{tag}_dustcorr_{safe}.csv')
     print(f'Saved {gal_id}_lines_info/summ{tag}_dustcorr_{safe}.csv in {folder}')
     return corrected
 
@@ -169,8 +170,8 @@ def run_dust(class_, laws=('ccm', 'calzetti', 'power'), tag='_mw_abs',
     print(f'=== {gal_id} ===')
  
     # load the saved line fits ----
-    results_dir = PROJ_DIR + 'new_results'
-    info = pd.read_csv(f'{results_dir}/{gal_id}/{gal_id}_lines_info{tag}.csv')
+    results_dir = f'{PROJ_DIR}new_results'
+    info = pd.read_csv(f'{results_dir}/{gal_id}/lines/{gal_id}_lines_info{tag}.csv')
     # drop unnecessary columns
     if 'Unnamed: 0' in info.columns:
         info = info.drop(columns=['Unnamed: 0'])
@@ -299,20 +300,21 @@ def run_dust(class_, laws=('ccm', 'calzetti', 'power'), tag='_mw_abs',
  
     # Save new data
     if save:
-        out_dir = f'{results_dir}/dust/{gal_id}'
+        gal = class_.gal_id
+        out_dir = f'{results_dir}/{gal}/lines/'
         os.makedirs(out_dir, exist_ok=True)
         for law in law_list:
             # E(B-V) from each line ratio (power/linear converted from A_Hb)
             edv_perline = pd.DataFrame(per_line[law]) * ebv_scale(law)
             safe = law.replace(':', '_')     # no ':' in file names
-            edv_perline.to_csv(f'{out_dir}/{gal_id}{tag}_ebv_perline_{safe}.csv')
+            edv_perline.to_csv(f'{out_dir}{tag}_ebv_perline_{safe}.csv')
  
         # E(B-V) per realization for every law (power/linear converted
         # from A_Hb), one column per law
         ebv_save = {}
         for law in law_list:
             ebv_save[law] = combined[law] * ebv_scale(law)
-        pd.DataFrame(ebv_save).to_csv(f'{out_dir}/{gal_id}{tag}_ebv_samples.csv')
+        pd.DataFrame(ebv_save).to_csv(f'{out_dir}/{gal_id}_{tag}_ebv_samples.csv')
         if corrected is not None:
             # law name in the file names, e.g. ..._dustcorr_ccm.csv, so
             # nothing is overwritten (not even the uncorrected tables)
@@ -342,6 +344,7 @@ def run_dust(class_, laws=('ccm', 'calzetti', 'power'), tag='_mw_abs',
         'hybrid_npar': hybrid_npar,
         'corrected_info': corrected,
         'corrected_summary': corrected_summary,
+        'tag': tag,
         'info': info
     }
     return res
