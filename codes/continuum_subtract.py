@@ -1,35 +1,6 @@
 """
 Continuum subtraction before FINAL_LINES, with the continuum uncertainty
 carried into the error spectrum.
-
-The continuum is built in two layers:
-
-  1. Spline continuum (as in the DAWN JWST Archive / msaexp): cubic B-splines
-     fitted TOGETHER with all the emission lines (fixed kinematics), so the
-     lines cannot pull the continuum up.
-  2. Local correction: the running median of (data - spline) over the
-     LINE-FREE pixels (+-half_window A), interpolated across the lines.
-     This follows what the splines cannot: echelle-order ripple and broad
-     stellar features (e.g. the G band next to H-gamma / [O III] 4363).
-     Under a line, the continuum is therefore an interpolation between its
-     two sidebands, like a local polynomial, but never using line pixels.
-
-The continuum uncertainty at each pixel has three parts:
-
-  sigma_stat  : statistical error of the spline (from the fit covariance)
-  sigma_local : error of the running median (1.2533 * std / sqrt(N))
-  sigma_knots : spread of the final continuum between knot spacings
-                (dlams, e.g. 100-300 A): the model choice
-
-  cont_err = sqrt(sigma_stat^2 + sigma_local^2 + sigma_knots^2)
-  err      = sqrt(err_pix^2 + cont_err^2)          (saved in the spectrum)
-
-IMPORTANT: the continuum error is the same (coherent) across a whole line,
-not independent pixel to pixel. Adding it per pixel in `err` is what was
-asked for, and it is what read_data will see, but for the most accurate
-line-flux errors use the coherent Monte Carlo in FINAL_LINES (see
-PATCH_FINAL_LINES below), which shifts the continuum by d * cont_err with one
-random d per realization.
 """
 import os
 import numpy as np
@@ -49,15 +20,7 @@ WIDE_LINES = ('H1_6563A', 'H1_4861A', 'O3_5007A', 'O3_4959A')
 def line_mask(fit, kin, linelist_dict, min_sigma=3.0, frac_err=0.3,
               wide_lines=WIDE_LINES, wide_kms=1500.0, bright_snr=30.0,
               bright_kms=1000.0):
-    """True where a line contributes: within min_sigma broad widths of any
-    line centre, or where the fitted line model is above frac_err * err
-    (this follows the wings of the bright lines, however strong).
-    Real line wings go further than the fixed-kinematics model, and if
-    those pixels count as line-free the continuum is lifted under the line
-    (and the line flux comes out too low). So:
-      * H-alpha, H-beta, [O III] 4959, 5007 (wide_lines): +-wide_kms,
-      * any other line whose model peak is > bright_snr * err (e.g. [S II],
-        [N II] 6583, [O II] 3727, [Ne III]): +-bright_kms."""
+
     w = fit['wave']
     lines_model = fit['model'] - fit['continuum']
     mask = lines_model > frac_err * fit['err']
@@ -76,8 +39,7 @@ def line_mask(fit, kin, linelist_dict, min_sigma=3.0, frac_err=0.3,
 
 
 def spline_stat_error(fit):
-    """Error of the spline continuum at each pixel, from the covariance of
-    the joint (splines + lines) least-squares fit."""
+
     Aw = fit['A'] / fit['err'][:, None]
     cov = np.linalg.pinv(Aw.T @ Aw)
     n = fit['n_spl']
@@ -89,8 +51,7 @@ def spline_stat_error(fit):
 
 def _sideband(wave, resid, free, edge, direction, width, min_pix,
               max_width):
-    """Free pixels on one side of a masked gap: [edge - width, edge) for
-    direction -1, (edge, edge + width] for +1, widened until min_pix."""
+
     w = width
     while True:
         if direction < 0:
@@ -104,15 +65,7 @@ def _sideband(wave, resid, free, edge, direction, width, min_pix,
 
 def local_correction(wave, resid, free, half_window=25.0, step=5.0,
                      min_pix=15, side_width=None, bridge=True):
-    """Running median of resid over the free (line-free) pixels, on nodes
-    every `step` A, and its error; both interpolated to every pixel.
 
-    bridge=True: across every masked stretch (a line or a blend) the
-    correction is a STRAIGHT LINE between the two sidebands (free pixels
-    within side_width A on each side, default half_window), joining the
-    running median at the sidebands' median wavelengths. Without it the nodes at
-    the edge of a wide mask see only one side, and the continuum gets a
-    V or a step under the line (seen under H-beta, [O III], [S II])."""
     nodes = np.arange(wave.min(), wave.max() + step, step)
     node_w = []
     node_med = []
@@ -236,13 +189,39 @@ def noise_scale(wave, r, free, half_window=150.0, step=25.0, max_lag=4,
     nw = np.array(nw)
     return np.interp(wave, nw, np.array(ns)), np.interp(wave, nw, np.array(nc))
 
+
+def sky_pixels(wave, err, free, half_window=15.0, k=1.5, grow=2):
+
+    n = len(wave)
+    base = np.zeros(n)
+    for i in range(n):
+        lo = np.searchsorted(wave, wave[i] - half_window)
+        hi = np.searchsorted(wave, wave[i] + half_window, side='right')
+        base[i] = np.median(err[lo:hi])
+    spike = (err > k * base) & free
+    flag = spike.copy()
+    for i in np.where(spike)[0]:
+        flag[max(0, i - grow):min(n, i + grow + 1)] = True
+    return flag
+
+
+def residual_envelope(resid, flag, grow=2):
+
+    n = len(resid)
+    env = np.zeros(n)
+    for i in np.where(flag)[0]:
+        env[i] = np.max(np.abs(resid[max(0, i - grow):min(n, i + grow + 1)]))
+    return env
+
 # ================================================================
 # Main function
 # ================================================================
 
 def build_continuum(wave, flux, err, linelist_dict, z0, kin,
                     dlam_best=200.0, dlams=(100.0, 150.0, 200.0, 300.0),
-                    half_window=25.0, rescale_err=True, correlated=True):
+                    half_window=25.0, rescale_err=True, correlated=True,
+                    sky_inflate=True, sky_waves=None, sky_half=1.5,
+                    sky_k=1.5, out_nsig=5.0):
     """
     Continuum and its uncertainty on the full wavelength grid.
     Returns a DataFrame with wave, flux (continuum-subtracted), err
@@ -289,10 +268,31 @@ def build_continuum(wave, flux, err, linelist_dict, z0, kin,
         cont_err = np.sqrt(sigma_stat**2 + best['sigma_local']**2
                            + sigma_knots**2)
 
+    flag = np.zeros(len(fw), dtype=bool)
+    infl = np.zeros(len(fw))
+    if sky_inflate:
+        err_pix_fit = best['fit']['err'] * factor
+        resid_lines = best['fit']['flux'] - best['fit']['model'] - best['local']
+        spike = sky_pixels(fw, best['fit']['err'], fw_free, k=sky_k)
+        outlier = fw_free & (np.abs(resid_lines) > out_nsig * err_pix_fit)
+        flag = spike | outlier
+        if sky_waves is not None:
+            for s in sky_waves:
+                flag[np.abs(fw - s) <= sky_half] = True
+        env = residual_envelope(resid_lines, flag)
+        infl[flag] = env[flag]
+        print(f'Sky/outlier pixels with inflated error: {flag.sum()}')
+    infl_full = np.zeros(len(wave))
+    infl_full[np.where(good)[0]] = infl
+    flag_full = np.zeros(len(wave), dtype=bool)
+    flag_full[np.where(good)[0]] = flag
+
     # back to the full grid (bad pixels keep their original values)
     cont_full = np.interp(wave, fw, best['cont'])
     out = pd.DataFrame({'wave': wave})
-    out['err_pix'] = err * np.interp(wave, fw, factor)
+    out['err_pix'] = np.sqrt((err * np.interp(wave, fw, factor))**2
+                             + infl_full**2)
+    out['sky_flag'] = flag_full
     out['err_factor'] = np.interp(wave, fw, factor)
     out['cont'] = cont_full
     out['cont_err'] = np.interp(wave, fw, cont_err)
@@ -310,13 +310,13 @@ def build_continuum(wave, flux, err, linelist_dict, z0, kin,
     return out, best['fit']
 
 
-def save_for_final_lines(class_, table, proj_DIR):
+def save_for_final_lines(class_, table, proj_DIR, out_name='cont_sub'):
     """Two files in new_results/cont_sub/{gal}/ (created if missing):
       {gal}_contsub.csv        wave, flux, err   (what read_data reads)
       {gal}_contsub_extra.csv  the continuum, its error pieces, err_pix
     """
     gal = class_.gal_id
-    folder = f'{proj_DIR}new_results/cont_sub/{gal}'
+    folder = f'{proj_DIR}new_results/{out_name}/{gal}'
     os.makedirs(folder, exist_ok=True)
     table[['wave', 'flux', 'err']].rename(columns={'err': 'sigma'}).to_csv(
         f'{folder}/{gal}_contsub.csv', index=False)
@@ -392,6 +392,10 @@ def plot_continuum(class_, table, linelist_dict, z, zoom, half_width=60.0,
         ax2.fill_between(t['wave'], -t['err'], t['err'], color='0.85',
                          step='mid', label='$\\pm$ err (saved)')
         ax2.step(t['wave'], t['flux'], where='mid', color='C0', lw=0.7)
+        if 'sky_flag' in t.columns:
+            sk = t['sky_flag'].values
+            ax2.plot(t['wave'][sk], np.zeros(sk.sum()), '|', color='C1', ms=6,
+                     label='inflated (sky/outlier)')
         ax2.axhline(0, color='k', lw=0.6)
         e_med = np.nanmedian(t['err'])
         ax2.set_ylim(-5 * e_med, 10 * e_med)
@@ -409,7 +413,8 @@ def plot_continuum(class_, table, linelist_dict, z, zoom, half_width=60.0,
 # ================================================================
 
 def run(class_, info_bright, proj_DIR, dlam_best=200.0, half_window=25.0,
-        plot=True, bcorr_path=None):
+        plot=True, bcorr_path=None, out_name='cont_sub', sky_inflate=True,
+        sky_waves=None):
     """
     class_      : SPECTRALDATA object
     info_bright : lines_info table of the current bright-line fits (only
@@ -422,7 +427,7 @@ def run(class_, info_bright, proj_DIR, dlam_best=200.0, half_window=25.0,
     """
     gal = class_.gal_id
     if bcorr_path is None:
-        bcorr_path = (f'{proj_DIR}new_results/balmer_abs/{gal}/'
+        bcorr_path = (f'{proj_DIR}new_results/balmer_abs_final/{gal}/'
                       f'bcorr_{gal}_new.csv')
     d = pd.read_csv(bcorr_path)
     wave = d.iloc[:, 0].to_numpy(dtype=float)
@@ -432,15 +437,16 @@ def run(class_, info_bright, proj_DIR, dlam_best=200.0, half_window=25.0,
     kin = sl.kinematics_from_info(info_bright)
     table, fit = build_continuum(wave, flux, err, class_.linelist_dict,
                                  class_.redshift, kin, dlam_best=dlam_best,
-                                 half_window=half_window)
-    save_for_final_lines(class_, table, proj_DIR)
+                                 half_window=half_window,
+                                 sky_inflate=sky_inflate, sky_waves=sky_waves)
+    save_for_final_lines(class_, table, proj_DIR, out_name=out_name)
     if plot:
         zoom = []
-        for label in ('H1_4861A', 'H1_6563A', 'H1_4340A', 'O3_4363A',
+        for label in ('H1_4861A', 'H1_4340A', 'O3_4363A', 'O2_3729A',
                       'N2_5755A', 'S3_6312A', 'O2_7320A'):
             if label in class_.linelist_dict:
                 zoom.append(label)
         plot_continuum(class_, table, class_.linelist_dict, fit['z'], zoom,
-                       save_path=f'{proj_DIR}new_results/cont_sub/{gal}/'
+                       save_path=f'{proj_DIR}new_results/{out_name}/{gal}/'
                                  f'{gal}_continuum.png')
     return table, fit
