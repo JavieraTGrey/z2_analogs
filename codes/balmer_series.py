@@ -71,7 +71,22 @@ def series_absorbers(class_, rest_window, metals=True, mg_triplet=True,
     return absorbers
 
 
-def absorber_profile(ab, wave, z, vel, vel_metal, shift=0.0):
+GAMMA_PER_SIGMA = np.sqrt(2 * np.log(2))
+
+
+def balmer_shape(wave, mu, sig, eta):
+    gamma = GAMMA_PER_SIGMA * sig
+    gauss = np.exp(-0.5 * ((wave - mu) / sig)**2)
+    lorentz = 1.0 / (1.0 + ((wave - mu) / gamma)**2)
+    return (1 - eta) * gauss + eta * lorentz
+
+
+def balmer_area(sig, eta):
+    gamma = GAMMA_PER_SIGMA * sig
+    return (1 - eta) * np.sqrt(2 * np.pi) * sig + eta * np.pi * gamma
+
+
+def absorber_profile(ab, wave, z, vel, vel_metal, shift=0.0, eta=0.0):
     """Unit-depth profile (positive) of one absorber on `wave`, and the
     integral of that profile in A (observed), used for the EW."""
     if ab['kind'] == 'cn':
@@ -80,6 +95,7 @@ def absorber_profile(ab, wave, z, vel, vel_metal, shift=0.0):
         prof = np.where((wave > a) & (wave < b), (wave - a) / (b - a), 0.0)
         return prof, 0.5 * (b - a), 0.5 * (a + b)
     v = vel if ab['kind'] == 'balmer' else vel_metal
+    e = eta if ab['kind'] == 'balmer' else 0.0
     prof = np.zeros(len(wave))
     integral = 0.0
     centre = 0.0
@@ -87,8 +103,8 @@ def absorber_profile(ab, wave, z, vel, vel_metal, shift=0.0):
     for lam in ab['rest']:
         mu = (lam + shift) * (1 + z)
         sig = mu * v / C_KMS
-        prof += np.exp(-0.5 * ((wave - mu) / sig)**2) / n
-        integral += np.sqrt(2 * np.pi) * sig / n
+        prof += balmer_shape(wave, mu, sig, e) / n
+        integral += balmer_area(sig, e) / n
         centre += mu / n
     return prof, integral, centre
 
@@ -107,7 +123,8 @@ def emission_mask(class_, wave, sigmas, core_size):
     return mask
 
 
-def design_matrix(wave, absorbers, z, vel, vel_metal, deg, shift=0.0):
+def design_matrix(wave, absorbers, z, vel, vel_metal, deg, shift=0.0,
+                  eta=0.0):
     """Columns: Legendre P_0..P_deg, then -profile for every absorber."""
     x = 2 * (wave - wave[0]) / (wave[-1] - wave[0]) - 1
     cols = []
@@ -115,16 +132,17 @@ def design_matrix(wave, absorbers, z, vel, vel_metal, deg, shift=0.0):
     for j in range(deg + 1):
         cols.append(leg[:, j])
     for ab in absorbers:
-        prof, _, _ = absorber_profile(ab, wave, z, vel, vel_metal, shift)
+        prof, _, _ = absorber_profile(ab, wave, z, vel, vel_metal, shift,
+                                      eta)
         cols.append(-prof)
     return np.column_stack(cols)
 
 
 def solve(wave, flux, err, good, absorbers, z, vel, vel_metal, deg,
-          shift=0.0, positive_balmer=False):
+          shift=0.0, positive_balmer=False, eta=0.0):
     """Weighted linear least squares. Polynomial free; metal/CN depths
     >= 0; Balmer depths free unless positive_balmer."""
-    A = design_matrix(wave, absorbers, z, vel, vel_metal, deg, shift)
+    A = design_matrix(wave, absorbers, z, vel, vel_metal, deg, shift, eta)
     Aw = A[good] / err[good][:, None]
     bw = flux[good] / err[good]
     lower = np.full(A.shape[1], -np.inf)
@@ -141,36 +159,57 @@ def solve(wave, flux, err, good, absorbers, z, vel, vel_metal, deg,
 
 
 def best_vel(wave, flux, err, good, absorbers, z, vel_grid, vel_metal_grid,
-             deg, positive_balmer=False):
+             deg, positive_balmer=False, eta_grid=(0.0,)):
     """
-    2D profile over the Balmer velocity grid and the metal velocity grid.
-    Returns (vel, coef, chi2, A, vel_metal) of the best pair, and the
-    chi2 profile over the Balmer grid (minimised over the metal grid).
+    Profile over the Balmer velocity grid, the metal velocity grid and the
+    Balmer shape grid (eta). Returns (vel, coef, chi2, A, vel_metal, eta)
+    of the best combination, and the chi2 profile over the Balmer velocity
+    grid (minimised over the other two).
     vel_metal_grid can be a single number (fixed width).
     """
     vm_grid = np.atleast_1d(np.asarray(vel_metal_grid, dtype=float))
+    et_grid = np.atleast_1d(np.asarray(eta_grid, dtype=float))
     best = None
     chi2_list = []
     for vel in vel_grid:
         best_here = np.inf
         for vm in vm_grid:
-            coef, chi2, A = solve(wave, flux, err, good, absorbers, z, vel,
-                                  vm, deg, positive_balmer=positive_balmer)
-            if chi2 < best_here:
-                best_here = chi2
-            if best is None or chi2 < best[2]:
-                best = (vel, coef, chi2, A, vm)
+            for et in et_grid:
+                coef, chi2, A = solve(wave, flux, err, good, absorbers, z,
+                                      vel, vm, deg,
+                                      positive_balmer=positive_balmer,
+                                      eta=et)
+                if chi2 < best_here:
+                    best_here = chi2
+                if best is None or chi2 < best[2]:
+                    best = (vel, coef, chi2, A, vm, et)
         chi2_list.append(best_here)
     return best, np.array(chi2_list)
 
 
-def ews_from_coef(coef, wave, absorbers, z, vel, vel_metal, deg, shift=0.0):
+def eta_profile(wave, flux, err, good, absorbers, z, vel, vel_metal_grid,
+                deg, eta_grid, positive_balmer=False):
+    vm_grid = np.atleast_1d(np.asarray(vel_metal_grid, dtype=float))
+    out = []
+    for et in eta_grid:
+        best_here = np.inf
+        for vm in vm_grid:
+            _, chi2, _ = solve(wave, flux, err, good, absorbers, z, vel, vm,
+                               deg, positive_balmer=positive_balmer, eta=et)
+            if chi2 < best_here:
+                best_here = chi2
+        out.append(best_here)
+    return np.array(out)
+
+
+def ews_from_coef(coef, wave, absorbers, z, vel, vel_metal, deg, shift=0.0,
+                  eta=0.0):
     """Rest-frame EW of every absorber from one solution."""
     ews = np.zeros(len(absorbers))
     heights = coef[deg + 1:]
     for k in range(len(absorbers)):
         _, integral, centre = absorber_profile(absorbers[k], wave, z, vel,
-                                               vel_metal, shift)
+                                               vel_metal, shift, eta)
         xc = 2 * (centre - wave[0]) / (wave[-1] - wave[0]) - 1
         cont = legendre.legval(xc, coef[:deg + 1])
         ews[k] = heights[k] * integral / cont / (1 + z)
@@ -196,7 +235,8 @@ def _prepare(class_, data, sigmas, rest_window, core_size, metals,
 def fit_balmer_series(class_, data, sigmas, rest_window=(3730., 4160.),
                       deg=4, vel_grid=None, vel_metal=None, core_size=4.0,
                       n_mc=1000, rescale=True, metals=True, mg_triplet=True,
-                      cn_band=True, positive_balmer=False, seed=None):
+                      cn_band=True, positive_balmer=False, seed=None,
+                      eta_grid=None):
     """
     data = (wave, flux, err), MW-corrected and NOT yet corrected for
     Balmer absorption in this window.
@@ -209,6 +249,9 @@ def fit_balmer_series(class_, data, sigmas, rest_window=(3730., 4160.),
         vel_grid = np.arange(250., 1001., 50.)
     if vel_metal is None:
         vel_metal = np.arange(100., 201., 25.)
+    if eta_grid is None:
+        eta_grid = np.array([0.0])
+    eta_grid = np.atleast_1d(np.asarray(eta_grid, dtype=float))
     rng = np.random.default_rng(seed)
 
     wave, flux, err, good, absorbers, z = _prepare(
@@ -219,36 +262,47 @@ def fit_balmer_series(class_, data, sigmas, rest_window=(3730., 4160.),
         names.append(ab['name'])
 
     # --- best fit on the data ---
-    (vel0, coef0, chi2_0, A0, vm0), chi2_grid = best_vel(
+    (vel0, coef0, chi2_0, A0, vm0, eta0), chi2_grid = best_vel(
         wave, flux, err, good, absorbers, z, vel_grid, vel_metal, deg,
-        positive_balmer)
+        positive_balmer, eta_grid)
     dof = np.sum(good) - (deg + 1) - len(absorbers) - 2
     chi2_nu = chi2_0 / dof
     scale = np.sqrt(chi2_nu) if (rescale and chi2_nu > 1) else 1.0
     err_mc = err * scale
+    chi2_eta = eta_profile(wave, flux, err, good, absorbers, z, vel0,
+                           vel_metal, deg, eta_grid, positive_balmer)
     print(f'Series fit: {len(absorbers)} absorbers, deg {deg}, best v = '
-          f'{vel0:.0f} km/s (metals {vm0:.0f} km/s), chi2_nu = '
-          f'{chi2_nu:.2f} (errors x {scale:.2f} for the MC)')
+          f'{vel0:.0f} km/s (metals {vm0:.0f} km/s, eta {eta0:.2f}), '
+          f'chi2_nu = {chi2_nu:.2f} (errors x {scale:.2f} for the MC)')
+    if len(eta_grid) > 1:
+        txt = []
+        for j in range(len(eta_grid)):
+            txt.append(f'{eta_grid[j]:.2f}: '
+                       f'{(chi2_eta[j] - chi2_eta.min()) / chi2_nu:.1f}')
+        print('  delta chi2 (rescaled) vs eta -> ' + ', '.join(txt))
 
     # --- Monte Carlo ---
     ew_draws = np.zeros((n_mc, len(absorbers)))
     h_draws = np.zeros((n_mc, len(absorbers)))
     vel_draws = np.zeros(n_mc)
     vm_draws = np.zeros(n_mc)
+    eta_draws = np.zeros(n_mc)
     model0 = A0 @ coef0
     for i in range(n_mc):
         fake = model0 + rng.standard_normal(len(wave)) * err_mc
-        (vel_i, coef_i, _, _, vm_i), _ = best_vel(
+        (vel_i, coef_i, _, _, vm_i, eta_i), _ = best_vel(
             wave, fake, err_mc, good, absorbers, z, vel_grid, vel_metal,
-            deg, positive_balmer)
+            deg, positive_balmer, eta_grid)
         ews, heights = ews_from_coef(coef_i, wave, absorbers, z, vel_i,
-                                     vm_i, deg)
+                                     vm_i, deg, eta=eta_i)
         ew_draws[i] = ews
         h_draws[i] = heights
         vel_draws[i] = vel_i
         vm_draws[i] = vm_i
+        eta_draws[i] = eta_i
 
-    ew0, _ = ews_from_coef(coef0, wave, absorbers, z, vel0, vm0, deg)
+    ew0, _ = ews_from_coef(coef0, wave, absorbers, z, vel0, vm0, deg,
+                           eta=eta0)
     rows = []
     for k in range(len(absorbers)):
         med = np.median(ew_draws[:, k])
@@ -262,7 +316,8 @@ def fit_balmer_series(class_, data, sigmas, rest_window=(3730., 4160.),
     print(table.to_string(index=False, float_format='%.2f'))
     print(f'  Balmer v = {np.median(vel_draws):.0f} +- '
           f'{np.std(vel_draws):.0f} km/s, metals v = '
-          f'{np.median(vm_draws):.0f} +- {np.std(vm_draws):.0f} km/s')
+          f'{np.median(vm_draws):.0f} +- {np.std(vm_draws):.0f} km/s, '
+          f'eta = {np.median(eta_draws):.2f} +- {np.std(eta_draws):.2f}')
 
     ew_dict = {}
     for k in range(len(absorbers)):
@@ -271,7 +326,8 @@ def fit_balmer_series(class_, data, sigmas, rest_window=(3730., 4160.),
     return {'names': names, 'absorbers': absorbers, 'ew_draws': ew_dict,
             'height_draws': h_draws, 'vel_draws': vel_draws,
             'vel_best': vel0, 'vel_metal': vm0, 'vel_metal_draws': vm_draws,
-            'coef_best': coef0,
+            'eta_best': eta0, 'eta_draws': eta_draws, 'eta_grid': eta_grid,
+            'chi2_eta': chi2_eta, 'coef_best': coef0,
             'deg': deg, 'wave': wave, 'flux': flux, 'err': err,
             'good': good, 'chi2_nu': chi2_nu, 'chi2_grid': chi2_grid,
             'vel_grid': vel_grid, 'table': table, 'z': z}
@@ -281,6 +337,7 @@ def series_absorption(res, wave, kinds=('balmer', 'metal', 'cn'), min_snr=3.0,
                       verbose=True):
 
     vel = np.median(res['vel_draws'])
+    eta = float(np.median(res.get('eta_draws', np.array([0.0]))))
     prof = np.zeros(len(wave))
     for k in range(len(res['absorbers'])):
         ab = res['absorbers'][k]
@@ -296,7 +353,8 @@ def series_absorption(res, wave, kinds=('balmer', 'metal', 'cn'), min_snr=3.0,
             continue
         if verbose:
             print(f"  {ab['name']}: subtracted (S/N = {snr:.1f})")
-        p, _, _ = absorber_profile(ab, wave, res['z'], vel, res['vel_metal'])
+        p, _, _ = absorber_profile(ab, wave, res['z'], vel, res['vel_metal'],
+                                   eta=eta)
         prof -= h * p
     return prof
 
@@ -304,7 +362,9 @@ def series_absorption(res, wave, kinds=('balmer', 'metal', 'cn'), min_snr=3.0,
 def plot_series(res, class_, save_path=None, name='series_fit'):
     wave, flux, good = res['wave'], res['flux'], res['good']
     deg, vel, z = res['deg'], res['vel_best'], res['z']
-    A = design_matrix(wave, res['absorbers'], z, vel, res['vel_metal'], deg)
+    eta = res.get('eta_best', 0.0)
+    A = design_matrix(wave, res['absorbers'], z, vel, res['vel_metal'], deg,
+                      eta=eta)
     coef = res['coef_best']
     model = A @ coef
     cont = A[:, :deg + 1] @ coef[:deg + 1]
@@ -324,7 +384,8 @@ def plot_series(res, class_, save_path=None, name='series_fit'):
     ax.plot(wave, cont, 'C0--', label='polynomial continuum')
     ax.plot(wave, balmer_only, 'C2-', lw=1, label='continuum + Balmer only')
     ax.plot(wave, model, 'r-', lw=1.2,
-            label=f'full model (v = {vel:.0f}, metals {res["vel_metal"]:.0f})')
+            label=f'full model (v = {vel:.0f}, metals {res["vel_metal"]:.0f}, '
+                  f'eta {eta:.2f})')
     for ab in res['absorbers']:
         _, _, centre = absorber_profile(ab, wave, z, vel, res['vel_metal'])
         color = 'C2' if ab['kind'] == 'balmer' else 'C1'
@@ -364,18 +425,18 @@ def plot_series(res, class_, save_path=None, name='series_fit'):
 # ================================================================
 
 def _ew_and_err(wave, flux, err, good, absorbers, z, vel, vel_metal, deg,
-                shift=0.0):
+                shift=0.0, eta=0.0):
     """EWs of the best fit at fixed vel, with linear (covariance) errors
     rescaled by sqrt(chi2_nu) (covariance of the unbounded problem: an
     approximation when a bound is active)."""
     coef, chi2, A = solve(wave, flux, err, good, absorbers, z, vel,
-                          vel_metal, deg, shift)
+                          vel_metal, deg, shift, eta=eta)
     Aw = A[good] / err[good][:, None]
     cov = np.linalg.pinv(Aw.T @ Aw)
     dof = np.sum(good) - A.shape[1]
     cov = cov * max(1.0, chi2 / dof)
     ews, _ = ews_from_coef(coef, wave, absorbers, z, vel, vel_metal, deg,
-                           shift)
+                           shift, eta)
     ew_err = np.zeros(len(absorbers))
     for k in range(len(absorbers)):
         h_err = np.sqrt(cov[deg + 1 + k, deg + 1 + k])
@@ -386,7 +447,7 @@ def _ew_and_err(wave, flux, err, good, absorbers, z, vel, vel_metal, deg,
 
 def shift_test(class_, data, sigmas, shifts=None, rest_window=(3730., 4160.),
                deg=4, vel=None, vel_metal=None, core_size=4.0, metals=True,
-               mg_triplet=True, cn_band=True, plot=True):
+               mg_triplet=True, cn_band=True, plot=True, eta=0.0):
     """
     NULL TEST. Move ALL absorbers by the same rest-frame shift (A) and
     refit. If the dips are real absorption, the mean Balmer EW is large
@@ -400,23 +461,24 @@ def shift_test(class_, data, sigmas, shifts=None, rest_window=(3730., 4160.),
     if vel_metal is None:
         vel_metal = np.arange(100., 201., 25.)
     vel_grid = np.arange(250., 1001., 50.) if vel is None else [vel]
-    (vel, _, _, _, vel_metal), _ = best_vel(wave, flux, err, good,
-                                            absorbers, z, vel_grid,
-                                            vel_metal, deg)
+    (vel, _, _, _, vel_metal, _), _ = best_vel(wave, flux, err, good,
+                                               absorbers, z, vel_grid,
+                                               vel_metal, deg,
+                                               eta_grid=[eta])
 
     mean_ew, mean_err, n_used = [], [], []
     for sh in shifts:
         keep = []
         for ab in absorbers:
             prof, _, centre = absorber_profile(ab, wave, z, vel, vel_metal,
-                                               sh)
+                                               sh, eta)
             half = 2 * centre * vel / C_KMS
             inside = (centre > wave[0] + half) and (centre < wave[-1] - half)
             near = good & (prof > 0.3)
             if inside and np.sum(near) >= 5:
                 keep.append(ab)
         ews, ew_err = _ew_and_err(wave, flux, err, good, keep, z, vel,
-                                  vel_metal, deg, sh)
+                                  vel_metal, deg, sh, eta)
         idx = []
         for j in range(len(keep)):
             if (keep[j]['kind'] == 'balmer'
@@ -453,7 +515,7 @@ def shift_test(class_, data, sigmas, shifts=None, rest_window=(3730., 4160.),
 
 def degree_test(class_, data, sigmas, degs=(2, 3, 4, 5, 6, 8),
                 rest_window=(3730., 4160.), vel_metal=None, core_size=4.0,
-                metals=True, mg_triplet=True, cn_band=True):
+                metals=True, mg_triplet=True, cn_band=True, eta=0.0):
     """EWs vs polynomial degree. Line absorption: stable. Continuum
     leaking into the lines: EWs drift with the degree."""
     wave, flux, err, good, absorbers, z = _prepare(
@@ -463,11 +525,13 @@ def degree_test(class_, data, sigmas, degs=(2, 3, 4, 5, 6, 8),
         vel_metal = np.arange(100., 201., 25.)
     rows = []
     for deg in degs:
-        (vel, _, chi2, _, vm), _ = best_vel(wave, flux, err, good, absorbers,
-                                            z, np.arange(250., 1001., 50.),
-                                            vel_metal, deg)
+        (vel, _, chi2, _, vm, _), _ = best_vel(wave, flux, err, good,
+                                               absorbers, z,
+                                               np.arange(250., 1001., 50.),
+                                               vel_metal, deg,
+                                               eta_grid=[eta])
         ews, ew_err = _ew_and_err(wave, flux, err, good, absorbers, z, vel,
-                                  vm, deg)
+                                  vm, deg, eta=eta)
         row = {'deg': deg, 'vel': vel, 'vel_metal': vm,
                'chi2_nu': chi2 / (np.sum(good) - deg - 1 - len(absorbers) - 1)}
         for k in range(len(absorbers)):
@@ -479,8 +543,9 @@ def degree_test(class_, data, sigmas, degs=(2, 3, 4, 5, 6, 8),
 
 
 def fit_hgamma(class_, data, sigmas, vel, rest_window=(4205., 4445.), deg=2,
-               n_mc=1000, vel_metal=None, seed=None):
+               n_mc=1000, vel_metal=None, seed=None, eta=0.0):
 
     return fit_balmer_series(class_, data, sigmas, rest_window=rest_window,
                              deg=deg, vel_grid=np.array([vel]), n_mc=n_mc,
-                             vel_metal=vel_metal, seed=seed)
+                             vel_metal=vel_metal, seed=seed,
+                             eta_grid=np.array([eta]))

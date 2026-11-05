@@ -33,12 +33,27 @@ EXCLUDE_FROM_EW = {'H1_3750A', 'H1_3734A', 'H1_3722A', 'H1_3704A',
 # Absorption profiles
 # ================================================================
 
-def neg_gauss(class_, line, w, A, vel=550):
+GAMMA_PER_SIGMA = np.sqrt(2 * np.log(2))
+
+
+def balmer_shape(w, mu, sigma, eta=0.0):
+    gamma = GAMMA_PER_SIGMA * sigma
+    gauss = np.exp(-0.5 * ((w - mu) / sigma)**2)
+    lorentz = 1.0 / (1.0 + ((w - mu) / gamma)**2)
+    return (1 - eta) * gauss + eta * lorentz
+
+
+def balmer_area(sigma, eta=0.0):
+    gamma = GAMMA_PER_SIGMA * sigma
+    return (1 - eta) * np.sqrt(2 * np.pi) * sigma + eta * np.pi * gamma
+
+
+def neg_gauss(class_, line, w, A, vel=550, eta=0.0):
     w_center = class_.linelist_dict[line]
     z = class_.redshift
     mu = w_center * (1 + z)
     sigma = w_center * (1 + z) * vel / 3e5
-    return -A * np.exp(-((mu - w) ** 2) / (2 * sigma**2))
+    return -A * balmer_shape(w, mu, sigma, eta)
 
 
 def absorption_func(class_, line, w, A, m, n):
@@ -144,7 +159,7 @@ def isolate_emission_line(class_, line, datas):
 # EW of the Balmer lines -> EW(H_beta)
 # ================================================================
 
-def get_EW_from_mc(class_, label, As, vel=550):
+def get_EW_from_mc(class_, label, As, vel=550, eta=0.0):
 
     w_center = class_.linelist_dict[label]
     z = class_.redshift
@@ -155,7 +170,7 @@ def get_EW_from_mc(class_, label, As, vel=550):
     height, m, n = As[:, 0], As[:, 1], As[:, 2]
 
     continuum_at_mu = m * mu + n
-    EW = (height * np.sqrt(2 * np.pi * sigma**2)
+    EW = (height * balmer_area(sigma, eta)
           / continuum_at_mu
           / (1 + z))
 
@@ -309,10 +324,10 @@ def ew_hbeta_draws(class_, params, vel=550, min_snr=3.0, lines=None,
 # H_alpha, H_beta, H_gamma correction from EW(H_beta)
 # ================================================================
 
-def continuum_for_ew(wave, flux, err, mu, sig_abs, ew_rest, z):
+def continuum_for_ew(wave, flux, err, mu, sig_abs, ew_rest, z, eta=0.0):
 
-    g = (ew_rest * (1 + z) / (np.sqrt(2 * np.pi) * sig_abs)
-         * np.exp(-0.5 * ((wave - mu) / sig_abs)**2))
+    g = (ew_rest * (1 + z) / balmer_area(sig_abs, eta)
+         * balmer_shape(wave, mu, sig_abs, eta))
     x_m = wave - mu * g
     x_n = 1.0 - g
 
@@ -327,7 +342,7 @@ def correct_ha_hb(class_, data, corrected_flux, sigmas, params, vel=550,
                   min_snr=3.0, core_size=4.0, lines_for_ew=None,
                   ratio_frac=0.0, seed=None, stamps=None, snr_mode='none',
                   ew_draws=None, ratio_lines=('H1_4861A', 'H1_6563A'),
-                  ew_hb_override=None):
+                  ew_hb_override=None, ew_line_override=None, eta=0.0):
 
     print('Correcting H_beta and H_alpha from the EW of the other lines...')
     rng = np.random.default_rng(seed)
@@ -365,14 +380,19 @@ def correct_ha_hb(class_, data, corrected_flux, sigmas, params, vel=550,
         ew_line = ew_hb * EW_all_ratios[line]
         if ratio_frac > 0:
             ew_line = ew_line * (1 + ratio_frac * rng.standard_normal(n_mc))
+        if ew_line_override is not None and line in ew_line_override:
+            mean_o, std_o = ew_line_override[line]
+            ew_line = rng.normal(mean_o, std_o, n_mc)
+            print(f'  {line}: EW set from its own wings: {mean_o:.2f} +- '
+                  f'{std_o:.2f} A')
         param = np.zeros((n_mc, 3))
         for i in range(n_mc):
             yoff = flux_s + rng.standard_normal(len(flux_s)) * err_s
             m, n = continuum_for_ew(wave_s, yoff, err_s, mu, sig_abs,
-                                    ew_line[i], z)
+                                    ew_line[i], z, eta)
             cont_mu = m * mu + n
             height = ew_line[i] * (1 + z) * cont_mu / \
-                (np.sqrt(2 * np.pi) * sig_abs)
+                balmer_area(sig_abs, eta)
             param[i, 0] = height
             param[i, 1] = m
             param[i, 2] = n
@@ -380,15 +400,16 @@ def correct_ha_hb(class_, data, corrected_flux, sigmas, params, vel=550,
 
         median_height = np.median(param[:, 0])
         corrected_flux -= neg_gauss(class_, line, wave, median_height,
-                                    vel=vel)
+                                    vel=vel, eta=eta)
 
         # integrated absorption flux (observed frame, flux units x A)
-        f_abs = param[:, 0] * np.sqrt(2 * np.pi) * sig_abs
+        f_abs = param[:, 0] * balmer_area(sig_abs, eta)
         abs_info[line] = {
             'EW_median': np.median(ew_line),
             'EW_std': np.std(ew_line),
             'height_median': median_height,
             'vel': vel,
+            'eta': eta,
             'F_abs_median': np.median(f_abs),
             'F_abs_std': np.std(f_abs),
             'lines_used': ' '.join(used),
@@ -440,7 +461,8 @@ def save_ew_table(class_, ew_table, save_dir):
     return save_path
 
 
-def save_mc_realizations(class_, params, save_dir, vel=550, extra_fabs=None):
+def save_mc_realizations(class_, params, save_dir, vel=550, extra_fabs=None,
+                         eta=0.0):
 
     os.makedirs(save_dir, exist_ok=True)
     save_path = f'{save_dir}/mc_realizations_{class_.gal_id}_new.h5'
@@ -451,10 +473,10 @@ def save_mc_realizations(class_, params, save_dir, vel=550, extra_fabs=None):
             grp.create_dataset('height', data=param[:, 0], compression='gzip')
             grp.create_dataset('m', data=param[:, 1], compression='gzip')
             grp.create_dataset('n', data=param[:, 2], compression='gzip')
-            EW_samples = get_EW_from_mc(class_, line, param, vel=vel)
+            EW_samples = get_EW_from_mc(class_, line, param, vel=vel, eta=eta)
             grp.create_dataset('EW', data=EW_samples, compression='gzip')
             mu = class_.linelist_dict[line] * (1 + class_.redshift)
-            f_abs = param[:, 0] * np.sqrt(2 * np.pi) * mu * vel / 3e5
+            f_abs = param[:, 0] * balmer_area(mu * vel / 3e5, eta)
             grp.create_dataset('F_abs', data=f_abs, compression='gzip')
         if extra_fabs is not None:
             for line in extra_fabs:
@@ -464,7 +486,8 @@ def save_mc_realizations(class_, params, save_dir, vel=550, extra_fabs=None):
                 grp.create_dataset('F_abs', data=extra_fabs[line],
                                    compression='gzip')
 
-    print(f'Saved {len(params)} lines x {next(iter(params.values())).shape[0]} '
+    print(f'Saved {len(params)} lines x '
+          f'{next(iter(params.values())).shape[0]} '
           f'MC realizations to: {save_path}')
     return save_path
 
@@ -588,7 +611,8 @@ def plot_hahb_correction(class_, data, flux_before, flux_after, params,
                     label='after')
         absorption = neg_gauss(class_, line, wave[m],
                                abs_info[line]['height_median'],
-                               vel=abs_info[line].get('vel', 550))
+                               vel=abs_info[line].get('vel', 550),
+                               eta=abs_info[line].get('eta', 0.0))
         cont = (np.median(params[line][:, 1]) * wave[m]
                 + np.median(params[line][:, 2]))
         axs[k].plot(wave[m], cont, 'k:', lw=1, label='continuum')
@@ -679,16 +703,17 @@ def hahb_flux_change(class_, data, flux_before, params, abs_info, sigmas,
                                 window, sigmas, deg)
         F0 = f0[line]
         vel = abs_info[line].get('vel', 550)
+        eta = abs_info[line].get('eta', 0.0)
         heights = np.asarray(params[line])[:, 0]
         changes, leaks = [], []
         for i in range(len(heights)):
             after = flux_before - neg_gauss(class_, line, wave, heights[i],
-                                            vel=vel)
+                                            vel=vel, eta=eta)
             fi, _ = _fit_emission(class_, wave, after, err, labels, window,
                                   sigmas, deg)
             changes.append(fi[line] - F0)
             mu = class_.linelist_dict[line] * (1 + class_.redshift)
-            f_abs = heights[i] * np.sqrt(2 * np.pi) * mu * vel / 3e5
+            f_abs = heights[i] * balmer_area(mu * vel / 3e5, eta)
             leaks.append((fi[line] - F0) / f_abs if f_abs != 0 else np.nan)
         changes = np.array(changes)
         draws[f'F_before_{line}'] = np.full(len(changes), F0)
@@ -697,7 +722,7 @@ def hahb_flux_change(class_, data, flux_before, params, abs_info, sigmas,
         f_abs_med = abs_info[line]['F_abs_median']
         after_med = flux_before - neg_gauss(class_, line, wave,
                                             abs_info[line]['height_median'],
-                                            vel=vel)
+                                            vel=vel, eta=eta)
         _, st1 = _fit_emission(class_, wave, after_med, err, labels, window,
                                sigmas, deg)
         stamps[line] = (st0, st1, window)
@@ -792,7 +817,8 @@ def run_balmer_series_pipeline(class_, n_mc=1000, base_dir=None, plot=True,
                                vel_grid=None, rest_window=(3730., 4160.),
                                hgamma_own=True,
                                subtract_kinds=('balmer', 'metal', 'cn'),
-                               min_snr=3.0, hgamma_in_ew=True):
+                               min_snr=3.0, hgamma_in_ew=True,
+                               ew_line_override=None, eta_grid=None):
 
     import balmer_series as bs
 
@@ -822,7 +848,8 @@ def run_balmer_series_pipeline(class_, n_mc=1000, base_dir=None, plot=True,
         vel_grid = np.arange(300., 801., 50.)
     res = bs.fit_balmer_series(class_, data, sigmas, deg=deg, n_mc=n_mc,
                                vel_grid=vel_grid, vel_metal=vel_metal,
-                               rest_window=rest_window, seed=seed)
+                               rest_window=rest_window, seed=seed,
+                               eta_grid=eta_grid)
     v_best = res['vel_best']
     if v_best <= np.min(vel_grid) or v_best >= np.max(vel_grid):
         print(f'  WARNING: Balmer width at the edge of the grid ({v_best:.0f} '
@@ -839,6 +866,11 @@ def run_balmer_series_pipeline(class_, n_mc=1000, base_dir=None, plot=True,
                                                  kinds=subtract_kinds,
                                                  min_snr=min_snr)
     vel = float(np.median(res['vel_draws']))
+    eta = float(np.median(res['eta_draws']))
+    if eta_grid is not None and len(np.atleast_1d(eta_grid)) > 1:
+        if (eta <= np.min(eta_grid) and np.min(eta_grid) > 0) or \
+                eta >= np.max(eta_grid):
+            print(f'  note: eta at the edge of its grid ({eta:.2f})')
 
     ew_draws = {}
     for line in res['ew_draws']:
@@ -847,7 +879,7 @@ def run_balmer_series_pipeline(class_, n_mc=1000, base_dir=None, plot=True,
     if use_hgamma:
         print('\nH_gamma local fit (width fixed to the series value):')
         res_hg = bs.fit_hgamma(class_, data, sigmas, vel, n_mc=n_mc,
-                               vel_metal=vel_metal, seed=seed)
+                               vel_metal=vel_metal, seed=seed, eta=eta)
         if plot:
             bs.plot_series(res_hg, class_, save_path=plot_dir,
                            name='hgamma_fit')
@@ -874,7 +906,8 @@ def run_balmer_series_pipeline(class_, n_mc=1000, base_dir=None, plot=True,
     corrected_flux, params, abs_info, ew_hb, ew_table = correct_ha_hb(
         class_, data, corrected_flux, sigmas, params, vel=vel,
         ew_draws=ew_draws, seed=seed, ratio_lines=ratio_lines,
-        ew_hb_override=ew_hb_override)
+        ew_hb_override=ew_hb_override, ew_line_override=ew_line_override,
+        eta=eta)
 
     if own_hg:
         # H_gamma corrected with the absorption of its OWN local fit (the
@@ -885,11 +918,11 @@ def run_balmer_series_pipeline(class_, n_mc=1000, base_dir=None, plot=True,
         ew_hg = res_hg['ew_draws']['H1_4340A']
         mu = class_.linelist_dict['H1_4340A'] * (1 + class_.redshift)
         sig = mu * vel / 3e5
-        f_abs_hg = res_hg['height_draws'][:, k_hg] * np.sqrt(2 * np.pi) * sig
+        f_abs_hg = res_hg['height_draws'][:, k_hg] * bs.balmer_area(sig, eta)
         abs_info['H1_4340A'] = {
             'EW_median': np.median(ew_hg), 'EW_std': np.std(ew_hg),
             'height_median': np.median(res_hg['height_draws'][:, k_hg]),
-            'vel': vel, 'F_abs_median': np.median(f_abs_hg),
+            'vel': vel, 'eta': eta, 'F_abs_median': np.median(f_abs_hg),
             'F_abs_std': np.std(f_abs_hg),
             'lines_used': 'own local fit'}
         print(f"  H1_4340A: corrected with its own fit, EW = "
@@ -918,7 +951,8 @@ def run_balmer_series_pipeline(class_, n_mc=1000, base_dir=None, plot=True,
         for i in range(len(res['vel_draws'])):
             _, integral, _ = bs.absorber_profile(ab, res['wave'], res['z'],
                                                  res['vel_draws'][i],
-                                                 res['vel_metal'])
+                                                 res['vel_metal'],
+                                                 eta=res['eta_draws'][i])
             f_abs[i] = res['height_draws'][i, k] * integral
         extra[ab['name']] = f_abs
     if own_hg:
@@ -942,7 +976,7 @@ def run_balmer_series_pipeline(class_, n_mc=1000, base_dir=None, plot=True,
         print(f'Saved flux_change_{class_.gal_id}_new.csv and '
               f'flux_change_draws_{class_.gal_id}_new.csv in {save_dir}')
         save_mc_realizations(class_, params, save_dir, vel=vel,
-                             extra_fabs=extra)
+                             extra_fabs=extra, eta=eta)
     return corrected_flux, res, abs_info, ew_hb
 
 
